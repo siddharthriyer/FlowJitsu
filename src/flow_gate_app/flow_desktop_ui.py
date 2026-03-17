@@ -1,9 +1,13 @@
 import json
 import os
 import re
+import shlex
+import shutil
+import subprocess
 import sys
 import urllib.request
 import webbrowser
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -589,6 +593,120 @@ class FlowDesktopApp:
             fh.write(response.read())
         return destination
 
+    def _current_app_bundle_path(self):
+        if not getattr(sys, "frozen", False):
+            return None
+        executable = os.path.abspath(sys.executable)
+        marker = ".app/Contents/MacOS/"
+        if marker in executable:
+            return executable.split(marker, 1)[0] + ".app"
+        current = executable
+        while current and current != os.path.dirname(current):
+            if current.endswith(".app"):
+                return current
+            current = os.path.dirname(current)
+        return None
+
+    def _extract_app_bundle_from_zip(self, zip_path):
+        extract_root = os.path.join(self._download_dir(), os.path.splitext(os.path.basename(zip_path))[0])
+        if os.path.isdir(extract_root):
+            shutil.rmtree(extract_root)
+        os.makedirs(extract_root, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_root)
+        for root, dirs, _files in os.walk(extract_root):
+            for directory in dirs:
+                if directory.endswith(".app"):
+                    return os.path.join(root, directory)
+        raise FileNotFoundError("No .app bundle found in the downloaded zip.")
+
+    def _write_update_helper_script(self, source_app, target_app):
+        helper_path = os.path.join(self._app_home(), "install_downloaded_update.sh")
+        pid = os.getpid()
+        source_q = shlex.quote(source_app)
+        target_q = shlex.quote(target_app)
+        parent_q = shlex.quote(os.path.dirname(target_app))
+        script = f"""#!/usr/bin/env bash
+set -euo pipefail
+
+APP_PID={pid}
+SOURCE_APP={source_q}
+TARGET_APP={target_q}
+TARGET_PARENT={parent_q}
+
+while kill -0 "$APP_PID" >/dev/null 2>&1; do
+  sleep 1
+done
+
+mkdir -p "$TARGET_PARENT"
+if rm -rf "$TARGET_APP" 2>/dev/null && cp -R "$SOURCE_APP" "$TARGET_APP" 2>/dev/null; then
+  open "$TARGET_APP"
+  exit 0
+fi
+
+osascript -e 'do shell script '\"'\"'rm -rf '\"'\"'"$TARGET_APP"'\"'\"' && cp -R '\"'\"'"$SOURCE_APP"'\"'\"' '\"'\"'"$TARGET_APP"'\"'\"'' with administrator privileges'
+open "$TARGET_APP"
+"""
+        with open(helper_path, "w") as fh:
+            fh.write(script)
+        os.chmod(helper_path, 0o755)
+        return helper_path
+
+    def _assist_install_downloaded_asset(self, asset, destination, latest_tag):
+        asset_name = asset.get("name", "")
+        if getattr(sys, "frozen", False) and asset_name.endswith(".zip"):
+            try:
+                extracted_app = self._extract_app_bundle_from_zip(destination)
+                current_app = self._current_app_bundle_path()
+                default_target_dir = os.path.dirname(current_app) if current_app else "/Applications"
+                target_dir = filedialog.askdirectory(
+                    title="Choose installation folder for updated app",
+                    initialdir=default_target_dir,
+                )
+                if not target_dir:
+                    self.status_var.set(f"Update downloaded to {destination}")
+                    return
+                target_app = os.path.join(target_dir, os.path.basename(extracted_app))
+                helper_path = self._write_update_helper_script(extracted_app, target_app)
+                proceed = messagebox.askyesno(
+                    "Install Downloaded Update",
+                    f"Ready to install {latest_tag}.\n\n"
+                    f"Downloaded app:\n{extracted_app}\n\n"
+                    f"Target location:\n{target_app}\n\n"
+                    f"The app will close, replace the bundle, and relaunch the new version.\n\n"
+                    f"Continue?",
+                )
+                if proceed:
+                    subprocess.Popen(["/bin/bash", helper_path], start_new_session=True)
+                    self.status_var.set(f"Installing update {latest_tag} into {target_app}")
+                    self.root.after(300, self.root.destroy)
+                else:
+                    self.status_var.set(f"Update downloaded to {destination}")
+            except Exception as exc:
+                self.status_var.set(f"Downloaded update but install handoff failed: {type(exc).__name__}: {exc}")
+                messagebox.showinfo(
+                    "Update Downloaded",
+                    f"Downloaded:\n{destination}\n\n"
+                    f"The app could not complete install handoff automatically.\n"
+                    f"You can install it manually from the downloaded file.",
+                )
+            return
+
+        install_msg = (
+            f"Downloaded:\n{destination}\n\n"
+            f"Install this update manually.\n"
+        )
+        if asset_name.endswith(".whl"):
+            install_msg += (
+                "Recommended command:\n\n"
+                f"python -m pip install --upgrade {destination}"
+            )
+        else:
+            install_msg += "Open the containing folder now?"
+        open_folder = messagebox.askyesno("Update Downloaded", install_msg)
+        if open_folder:
+            webbrowser.open(f"file://{os.path.dirname(destination)}")
+
     def check_for_updates(self):
         try:
             self.status_var.set("Checking GitHub for updates...")
@@ -619,12 +737,7 @@ class FlowDesktopApp:
                     self.status_var.set(f"Downloading update asset: {asset.get('name', '')}")
                     destination = self._download_release_asset(asset)
                     self.status_var.set(f"Downloaded update to {destination}")
-                    open_folder = messagebox.askyesno(
-                        "Update Downloaded",
-                        f"Downloaded:\n{destination}\n\nOpen the containing folder now?",
-                    )
-                    if open_folder:
-                        webbrowser.open(f"file://{os.path.dirname(destination)}")
+                    self._assist_install_downloaded_asset(asset, destination, latest_tag)
                 elif action is False:
                     webbrowser.open(latest.get("html_url", GITHUB_RELEASES_URL))
             else:

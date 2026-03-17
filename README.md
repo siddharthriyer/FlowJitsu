@@ -62,6 +62,13 @@ The desktop UI includes a `Check for Updates` button. It queries the latest GitH
 - open the GitHub release page
 - report when the app is already current
 
+When running as a bundled macOS app, the updater can also:
+
+- unzip the downloaded app bundle
+- ask where to install the replacement app
+- close the current app
+- replace the app bundle and relaunch it
+
 ## Install
 
 ### Recommended: install into `biocompute-vscode-min`
