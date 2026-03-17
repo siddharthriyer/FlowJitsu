@@ -8,6 +8,7 @@ import sys
 import urllib.request
 import webbrowser
 import zipfile
+import traceback
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -22,7 +23,7 @@ from matplotlib.widgets import PolygonSelector
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
-from . import __version__
+from ._app_version import __version__
 
 
 GITHUB_REPO = "siddharthriyer/FlowJitsu"
