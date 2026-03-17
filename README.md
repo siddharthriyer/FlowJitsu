@@ -54,6 +54,10 @@ The app can generate a dated notebook that loads those CSVs and includes example
 - dose curves
 - fluorescence intensity distributions
 
+### Update Checks
+
+The desktop UI includes a `Check for Updates` button. It queries the latest GitHub Release for `siddharthriyer/FlowJitsu`, compares that release tag to the local app version, and can open the release page when a newer version is available.
+
 ## Install
 
 ### Recommended: install into `biocompute-vscode-min`

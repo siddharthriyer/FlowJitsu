@@ -2,6 +2,8 @@ import json
 import os
 import re
 import sys
+import urllib.request
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -15,6 +17,13 @@ from matplotlib.path import Path
 from matplotlib.widgets import PolygonSelector
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
+
+from . import __version__
+
+
+GITHUB_REPO = "siddharthriyer/FlowJitsu"
+GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
+GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 
 def _normalize_instrument_name(instrument):
@@ -117,6 +126,15 @@ def _is_count_axis(value):
 def _event_adds_to_selection(event):
     state = int(getattr(event, "state", 0))
     return bool(state & 0x0001 or state & 0x0004 or state & 0x0008 or state & 0x0010)
+
+
+def _normalize_version_tag(version):
+    return str(version).strip().lstrip("vV")
+
+
+def _version_key(version):
+    parts = re.findall(r"\d+", _normalize_version_tag(version))
+    return tuple(int(part) for part in parts) if parts else (0,)
 
 
 def _gate_mask(transformed_df, gate_spec):
@@ -229,7 +247,7 @@ class FlowDesktopApp:
         self.base_dir = base_dir or os.getcwd()
         self.max_points_default = int(max_points)
         self.root = tk.Tk()
-        self.root.title("Flow Gate Desktop")
+        self.root.title(f"Flow Gate Desktop v{__version__}")
         self.root.geometry("1440x840")
 
         self.folder_var = tk.StringVar(value=self.base_dir)
@@ -248,6 +266,7 @@ class FlowDesktopApp:
         self.mode_var = tk.StringVar(value="idle")
         self.status_var = tk.StringVar(value="Choose a folder and click Load Folder.")
         self.gate_status_var = tk.StringVar(value="")
+        self.version_var = tk.StringVar(value=f"Version {__version__}")
         self.heatmap_mode_var = tk.StringVar(value="percent")
         self.heatmap_metric_var = tk.StringVar(value="")
         self.heatmap_population_var = tk.StringVar(value="__all__")
@@ -391,10 +410,12 @@ class FlowDesktopApp:
         ttk.Button(left, text="Export Intensities CSV", command=self.export_intensity_csv).grid(row=21, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(left, text="Analysis Preview", command=self.open_analysis_preview).grid(row=21, column=1, sticky="ew", padx=4, pady=(8, 0))
         ttk.Button(left, text="Open Analysis Notebook", command=self.create_and_open_analysis_notebook).grid(row=21, column=2, sticky="ew", pady=(8, 0))
+        ttk.Button(left, text="Check for Updates", command=self.check_for_updates).grid(row=22, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(left, textvariable=self.version_var).grid(row=22, column=1, columnspan=2, sticky="w", padx=4, pady=(8, 0))
 
-        ttk.Label(left, textvariable=self.mode_var, wraplength=480).grid(row=22, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(left, textvariable=self.status_var, wraplength=480).grid(row=23, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        ttk.Label(left, textvariable=self.gate_status_var, wraplength=480).grid(row=24, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Label(left, textvariable=self.mode_var, wraplength=480).grid(row=23, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        ttk.Label(left, textvariable=self.status_var, wraplength=480).grid(row=24, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Label(left, textvariable=self.gate_status_var, wraplength=480).grid(row=25, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
         ttk.Label(right, text="Interactive Plot").grid(row=0, column=0, sticky="w")
         canvas_frame = ttk.Frame(right)
@@ -510,6 +531,51 @@ class FlowDesktopApp:
             os.makedirs(base, exist_ok=True)
             return base
         return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+
+    def _latest_release_info(self):
+        request = urllib.request.Request(
+            GITHUB_LATEST_RELEASE_API,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "FlowGateApp",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return {
+            "tag_name": payload.get("tag_name", ""),
+            "html_url": payload.get("html_url", GITHUB_RELEASES_URL),
+            "name": payload.get("name", ""),
+        }
+
+    def check_for_updates(self):
+        try:
+            self.status_var.set("Checking GitHub for updates...")
+            latest = self._latest_release_info()
+            latest_tag = latest["tag_name"] or ""
+            current_tag = f"v{_normalize_version_tag(__version__)}"
+            self.version_var.set(f"Version {__version__} | Latest {latest_tag or 'unknown'}")
+            if latest_tag and _version_key(latest_tag) > _version_key(current_tag):
+                open_release = messagebox.askyesno(
+                    "Update Available",
+                    f"A newer version is available.\n\n"
+                    f"Current: {current_tag}\n"
+                    f"Latest: {latest_tag}\n\n"
+                    f"Open the GitHub release page now?",
+                )
+                self.status_var.set(f"Update available: {latest_tag}")
+                if open_release:
+                    webbrowser.open(latest.get("html_url", GITHUB_RELEASES_URL))
+            else:
+                messagebox.showinfo(
+                    "Up To Date",
+                    f"You are already on the latest available version.\n\n"
+                    f"Current: {current_tag}\n"
+                    f"Latest: {latest_tag or current_tag}",
+                )
+                self.status_var.set(f"Up to date: {current_tag}")
+        except Exception as exc:
+            self.status_var.set(f"Update check failed: {type(exc).__name__}: {exc}")
 
     def _session_dir(self):
         session_dir = os.path.join(self._app_home(), "sessions")
