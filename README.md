@@ -56,7 +56,11 @@ The app can generate a dated notebook that loads those CSVs and includes example
 
 ### Update Checks
 
-The desktop UI includes a `Check for Updates` button. It queries the latest GitHub Release for `siddharthriyer/FlowJitsu`, compares that release tag to the local app version, and can open the release page when a newer version is available.
+The desktop UI includes a `Check for Updates` button. It queries the latest GitHub Release for `siddharthriyer/FlowJitsu`, compares that release tag to the local app version, and can:
+
+- download the recommended release asset into `~/Downloads/FlowGateAppUpdates/`
+- open the GitHub release page
+- report when the app is already current
 
 ## Install
 

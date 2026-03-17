@@ -24,6 +24,7 @@ from . import __version__
 GITHUB_REPO = "siddharthriyer/FlowJitsu"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
 GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+DOWNLOADS_SUBDIR = "FlowGateAppUpdates"
 
 
 def _normalize_instrument_name(instrument):
@@ -532,6 +533,11 @@ class FlowDesktopApp:
             return base
         return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
+    def _download_dir(self):
+        download_dir = os.path.join(os.path.expanduser("~"), "Downloads", DOWNLOADS_SUBDIR)
+        os.makedirs(download_dir, exist_ok=True)
+        return download_dir
+
     def _latest_release_info(self):
         request = urllib.request.Request(
             GITHUB_LATEST_RELEASE_API,
@@ -546,7 +552,42 @@ class FlowDesktopApp:
             "tag_name": payload.get("tag_name", ""),
             "html_url": payload.get("html_url", GITHUB_RELEASES_URL),
             "name": payload.get("name", ""),
+            "assets": payload.get("assets", []),
         }
+
+    def _select_release_asset(self, release_info):
+        assets = release_info.get("assets", [])
+        if not assets:
+            return None
+
+        names = {asset.get("name", ""): asset for asset in assets}
+        if getattr(sys, "frozen", False):
+            for suffix in ("FlowGateApp-macos.zip", ".app.zip", ".zip"):
+                for name, asset in names.items():
+                    if name.endswith(suffix):
+                        return asset
+
+        for name, asset in names.items():
+            if name.endswith(".whl"):
+                return asset
+        for name, asset in names.items():
+            if name.endswith((".tar.gz", ".zip")):
+                return asset
+        return assets[0]
+
+    def _download_release_asset(self, asset):
+        asset_name = asset.get("name", "release_asset")
+        asset_url = asset.get("browser_download_url")
+        if not asset_url:
+            raise ValueError("Selected release asset does not have a download URL.")
+        destination = os.path.join(self._download_dir(), asset_name)
+        request = urllib.request.Request(
+            asset_url,
+            headers={"User-Agent": "FlowGateApp"},
+        )
+        with urllib.request.urlopen(request, timeout=60) as response, open(destination, "wb") as fh:
+            fh.write(response.read())
+        return destination
 
     def check_for_updates(self):
         try:
@@ -556,15 +597,35 @@ class FlowDesktopApp:
             current_tag = f"v{_normalize_version_tag(__version__)}"
             self.version_var.set(f"Version {__version__} | Latest {latest_tag or 'unknown'}")
             if latest_tag and _version_key(latest_tag) > _version_key(current_tag):
-                open_release = messagebox.askyesno(
+                action = messagebox.askyesnocancel(
                     "Update Available",
                     f"A newer version is available.\n\n"
                     f"Current: {current_tag}\n"
                     f"Latest: {latest_tag}\n\n"
-                    f"Open the GitHub release page now?",
+                    f"Yes: download the recommended update asset\n"
+                    f"No: open the GitHub release page\n"
+                    f"Cancel: do nothing",
                 )
                 self.status_var.set(f"Update available: {latest_tag}")
-                if open_release:
+                if action is True:
+                    asset = self._select_release_asset(latest)
+                    if asset is None:
+                        messagebox.showinfo(
+                            "No Downloadable Asset",
+                            "No downloadable release asset was found. Opening the release page instead.",
+                        )
+                        webbrowser.open(latest.get("html_url", GITHUB_RELEASES_URL))
+                        return
+                    self.status_var.set(f"Downloading update asset: {asset.get('name', '')}")
+                    destination = self._download_release_asset(asset)
+                    self.status_var.set(f"Downloaded update to {destination}")
+                    open_folder = messagebox.askyesno(
+                        "Update Downloaded",
+                        f"Downloaded:\n{destination}\n\nOpen the containing folder now?",
+                    )
+                    if open_folder:
+                        webbrowser.open(f"file://{os.path.dirname(destination)}")
+                elif action is False:
                     webbrowser.open(latest.get("html_url", GITHUB_RELEASES_URL))
             else:
                 messagebox.showinfo(
