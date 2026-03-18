@@ -11,13 +11,17 @@ import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import colorchooser, messagebox, ttk
 
 
 _SNS = None
-PRISM_AXIS_LINEWIDTH = 2.0
-PRISM_BAR_EDGE_LINEWIDTH = 2.0
-PRISM_LEGEND_LINEWIDTH = 1.8
+PRISM_STYLE = {
+    "axis_linewidth": 2.0,
+    "bar_edge_linewidth": 3.0,
+    "legend_linewidth": 1.8,
+    "bar_fill": "#9ec9ff",
+    "errorbar_capsize": 0.18,
+}
 
 
 def _sns():
@@ -31,17 +35,18 @@ def _sns():
 def _apply_prism_axis_style(ax):
     for side in ("left", "bottom"):
         if side in ax.spines:
-            ax.spines[side].set_linewidth(PRISM_AXIS_LINEWIDTH)
+            ax.spines[side].set_linewidth(PRISM_STYLE["axis_linewidth"])
             ax.spines[side].set_color("#111111")
     for side in ("top", "right"):
         if side in ax.spines:
             ax.spines[side].set_visible(False)
-    ax.tick_params(axis="both", which="both", width=PRISM_AXIS_LINEWIDTH, length=6, color="#111111")
+    ax.tick_params(axis="both", which="both", width=PRISM_STYLE["axis_linewidth"], length=6, color="#111111")
 
 
 def _apply_prism_bar_style(ax):
     for patch in getattr(ax, "patches", []):
-        patch.set_linewidth(PRISM_BAR_EDGE_LINEWIDTH)
+        patch.set_facecolor(PRISM_STYLE["bar_fill"])
+        patch.set_linewidth(PRISM_STYLE["bar_edge_linewidth"])
         patch.set_edgecolor("#111111")
 
 
@@ -50,7 +55,7 @@ def _apply_prism_legend_style(ax):
     if legend is None:
         return
     frame = legend.get_frame()
-    frame.set_linewidth(PRISM_LEGEND_LINEWIDTH)
+    frame.set_linewidth(PRISM_STYLE["legend_linewidth"])
     frame.set_edgecolor("#111111")
     frame.set_facecolor("white")
     frame.set_alpha(1)
@@ -70,8 +75,27 @@ def open_analysis_preview(self):
     top.columnconfigure(0, weight=1)
     top.columnconfigure(1, weight=0)
 
-    controls = ttk.Frame(top, padding=10)
-    controls.grid(row=0, column=0, sticky="ew")
+    controls_outer = ttk.Frame(top, padding=(10, 10, 10, 0))
+    controls_outer.grid(row=0, column=0, columnspan=2, sticky="ew")
+    controls_outer.columnconfigure(0, weight=1)
+    controls_outer.rowconfigure(0, weight=1)
+    controls_canvas = tk.Canvas(controls_outer, highlightthickness=0, height=128)
+    controls_canvas.grid(row=0, column=0, sticky="ew")
+    controls_xscroll = ttk.Scrollbar(controls_outer, orient="horizontal", command=controls_canvas.xview)
+    controls_xscroll.grid(row=1, column=0, sticky="ew")
+    controls_canvas.configure(xscrollcommand=controls_xscroll.set)
+    controls = ttk.Frame(controls_canvas, padding=10)
+    controls_window = controls_canvas.create_window((0, 0), window=controls, anchor="nw")
+
+    def _sync_controls_scroll(_event=None):
+        controls_canvas.configure(scrollregion=controls_canvas.bbox("all"))
+
+    def _resize_controls_window(event):
+        min_width = max(event.width, controls.winfo_reqwidth())
+        controls_canvas.itemconfigure(controls_window, width=min_width)
+
+    controls.bind("<Configure>", _sync_controls_scroll)
+    controls_canvas.bind("<Configure>", _resize_controls_window)
 
     plot_mode_var = tk.StringVar(value="bar")
     pct_cols = [c for c in summary.columns if c.startswith("pct_")]
@@ -163,9 +187,32 @@ def open_analysis_preview(self):
     toolbar.update()
     toolbar.grid(row=1, column=0, sticky="ew")
 
-    palette_frame = ttk.LabelFrame(top, text="Sample Palette Groups", padding=10)
-    palette_frame.grid(row=1, column=1, sticky="ns", padx=(0, 10), pady=10)
+    palette_outer = ttk.Frame(top, padding=(0, 10, 10, 10))
+    palette_outer.grid(row=1, column=1, sticky="ns")
+    palette_outer.columnconfigure(0, weight=1)
+    palette_outer.rowconfigure(0, weight=1)
+    palette_canvas = tk.Canvas(palette_outer, highlightthickness=0, width=360)
+    palette_canvas.grid(row=0, column=0, sticky="ns")
+    palette_scroll = ttk.Scrollbar(palette_outer, orient="vertical", command=palette_canvas.yview)
+    palette_scroll.grid(row=0, column=1, sticky="ns")
+    palette_canvas.configure(yscrollcommand=palette_scroll.set)
+    palette_frame = ttk.LabelFrame(palette_canvas, text="Sample Palette Groups", padding=10)
+    palette_window = palette_canvas.create_window((0, 0), window=palette_frame, anchor="nw")
     palette_frame.columnconfigure(0, weight=1)
+
+    def _sync_palette_scroll(_event=None):
+        palette_canvas.configure(scrollregion=palette_canvas.bbox("all"))
+
+    def _resize_palette_window(_event=None):
+        palette_canvas.itemconfigure(palette_window, width=palette_canvas.winfo_width())
+
+    def _on_palette_mousewheel(event):
+        palette_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    palette_frame.bind("<Configure>", _sync_palette_scroll)
+    palette_canvas.bind("<Configure>", _resize_palette_window)
+    palette_canvas.bind("<MouseWheel>", _on_palette_mousewheel)
+    palette_frame.bind("<MouseWheel>", _on_palette_mousewheel)
 
     ttk.Label(palette_frame, text="Check samples, move them into a target group, and assign any seaborn or matplotlib palette name to that group.", wraplength=300).grid(row=0, column=0, sticky="w", pady=(0, 8))
     ttk.Label(palette_frame, textvariable=drag_status_var, wraplength=300).grid(row=1, column=0, sticky="w", pady=(0, 8))
@@ -272,6 +319,74 @@ def open_analysis_preview(self):
             return None
         return float(value)
 
+    def _open_advanced_settings():
+        dialog = tk.Toplevel(top)
+        dialog.title("Advanced Settings")
+        dialog.transient(top)
+        dialog.grab_set()
+        dialog.columnconfigure(1, weight=1)
+
+        axis_var = tk.StringVar(value=str(PRISM_STYLE["axis_linewidth"]))
+        bar_edge_var = tk.StringVar(value=str(PRISM_STYLE["bar_edge_linewidth"]))
+        legend_var = tk.StringVar(value=str(PRISM_STYLE["legend_linewidth"]))
+        fill_var = tk.StringVar(value=str(PRISM_STYLE["bar_fill"]))
+        capsize_var = tk.StringVar(value=str(PRISM_STYLE["errorbar_capsize"]))
+
+        ttk.Label(dialog, text="Axis line width").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
+        ttk.Entry(dialog, textvariable=axis_var, width=12).grid(row=0, column=1, sticky="ew", padx=10, pady=(10, 6))
+        ttk.Label(dialog, text="Bar outline width").grid(row=1, column=0, sticky="w", padx=10, pady=6)
+        ttk.Entry(dialog, textvariable=bar_edge_var, width=12).grid(row=1, column=1, sticky="ew", padx=10, pady=6)
+        ttk.Label(dialog, text="Legend outline width").grid(row=2, column=0, sticky="w", padx=10, pady=6)
+        ttk.Entry(dialog, textvariable=legend_var, width=12).grid(row=2, column=1, sticky="ew", padx=10, pady=6)
+        ttk.Label(dialog, text="Bar fill color").grid(row=3, column=0, sticky="w", padx=10, pady=6)
+        color_row = ttk.Frame(dialog)
+        color_row.grid(row=3, column=1, sticky="ew", padx=10, pady=6)
+        color_row.columnconfigure(0, weight=1)
+        ttk.Entry(color_row, textvariable=fill_var, width=14).grid(row=0, column=0, sticky="ew")
+        ttk.Label(dialog, text="Error bar cap size").grid(row=4, column=0, sticky="w", padx=10, pady=6)
+        ttk.Entry(dialog, textvariable=capsize_var, width=12).grid(row=4, column=1, sticky="ew", padx=10, pady=6)
+
+        def _choose_fill():
+            chosen = colorchooser.askcolor(color=fill_var.get(), parent=dialog, title="Choose bar fill color")
+            if chosen and chosen[1]:
+                fill_var.set(chosen[1])
+
+        ttk.Button(color_row, text="Pick", command=_choose_fill).grid(row=0, column=1, padx=(6, 0))
+
+        def _apply_settings():
+            try:
+                axis_width = float(axis_var.get())
+                bar_edge_width = float(bar_edge_var.get())
+                legend_width = float(legend_var.get())
+                capsize = float(capsize_var.get())
+            except ValueError:
+                messagebox.showerror("Invalid Settings", "Line widths and cap size must be numeric.", parent=dialog)
+                return
+            if axis_width <= 0 or bar_edge_width <= 0 or legend_width <= 0:
+                messagebox.showerror("Invalid Settings", "Line widths must be greater than zero.", parent=dialog)
+                return
+            if capsize < 0:
+                messagebox.showerror("Invalid Settings", "Cap size must be zero or greater.", parent=dialog)
+                return
+            fill = fill_var.get().strip()
+            if not fill:
+                messagebox.showerror("Invalid Settings", "Bar fill color cannot be empty.", parent=dialog)
+                return
+            PRISM_STYLE["axis_linewidth"] = axis_width
+            PRISM_STYLE["bar_edge_linewidth"] = bar_edge_width
+            PRISM_STYLE["legend_linewidth"] = legend_width
+            PRISM_STYLE["bar_fill"] = fill
+            PRISM_STYLE["errorbar_capsize"] = capsize
+            dialog.destroy()
+            redraw_preview()
+
+        button_row = ttk.Frame(dialog)
+        button_row.grid(row=5, column=0, columnspan=2, sticky="e", padx=10, pady=(10, 10))
+        ttk.Button(button_row, text="Apply", command=_apply_settings).grid(row=0, column=0)
+        ttk.Button(button_row, text="Close", command=dialog.destroy).grid(row=0, column=1, padx=(6, 0))
+
+    ttk.Button(controls, text="Advanced Settings", command=_open_advanced_settings).grid(row=1, column=8, padx=(10, 4), sticky="e")
+
     def _apply_plot_formatting(default_title=None, default_xlabel=None, default_ylabel=None):
         title = plot_title_var.get().strip() or default_title
         xlabel = x_title_var.get().strip() or default_xlabel
@@ -309,14 +424,14 @@ def open_analysis_preview(self):
             xcol = x_axis_var.get() if x_axis_var.get() in plot_df.columns else "well"
             huecol = hue_var.get() if hue_var.get() in plot_df.columns and hue_var.get() else None
             if huecol == "sample_name":
-                _sns().barplot(data=plot_df, x=xcol, y=pct_col_var.get(), hue=huecol, palette=_palette_for_hue("sample_name"), ax=ax)
+                _sns().barplot(data=plot_df, x=xcol, y=pct_col_var.get(), hue=huecol, palette=_palette_for_hue("sample_name"), capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
             elif huecol is None and xcol == "sample_name":
                 sample_palette = _palette_for_hue("sample_name") or {}
                 order = list(plot_df[xcol].dropna().astype(str).unique())
-                colors = [sample_palette.get(name, "#4c72b0") for name in order]
-                _sns().barplot(data=plot_df, x=xcol, y=pct_col_var.get(), order=order, palette=colors, ax=ax)
+                colors = [sample_palette.get(name, PRISM_STYLE["bar_fill"]) for name in order]
+                _sns().barplot(data=plot_df, x=xcol, y=pct_col_var.get(), order=order, palette=colors, saturation=1, capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
             else:
-                _sns().barplot(data=plot_df, x=xcol, y=pct_col_var.get(), hue=huecol, ax=ax)
+                _sns().barplot(data=plot_df, x=xcol, y=pct_col_var.get(), hue=huecol, color=PRISM_STYLE["bar_fill"], saturation=1, capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
             _apply_plot_formatting(default_title=pct_col_var.get().replace("pct_", "") if pct_col_var.get() else "Percent Positive", default_xlabel=xcol, default_ylabel="% positive")
             ax.tick_params(axis="x", rotation=45)
             fig.tight_layout()
@@ -360,9 +475,9 @@ def open_analysis_preview(self):
             if corr_df.empty:
                 ax.set_title("No valid correlations after filtering"); canvas.draw_idle(); return
             if huecol == "sample_name":
-                _sns().barplot(data=corr_df, x=xcol, y="correlation", hue=huecol, palette=_palette_for_hue("sample_name"), ax=ax)
+                _sns().barplot(data=corr_df, x=xcol, y="correlation", hue=huecol, palette=_palette_for_hue("sample_name"), capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
             else:
-                _sns().barplot(data=corr_df, x=xcol, y="correlation", hue=huecol, ax=ax)
+                _sns().barplot(data=corr_df, x=xcol, y="correlation", hue=huecol, color=PRISM_STYLE["bar_fill"], saturation=1, capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
             ax.set_ylim(-1.05, 1.05); ax.axhline(0, color="#666666", linewidth=1.6, linestyle="--"); ax.tick_params(axis="x", rotation=45)
             _apply_plot_formatting(default_title=f"Correlation: {channel_var.get()} vs {corr_channel_y_var.get()}", default_xlabel=xcol, default_ylabel="correlation")
             fig.tight_layout(); canvas.draw_idle(); return
@@ -435,7 +550,7 @@ def build_html_report_sections(self, summary, intensity, plate):
         try:
             fig = Figure(figsize=(10, 4.8), dpi=100); ax = fig.add_subplot(111)
             xcol = "sample_name" if "sample_name" in summary.columns else "well"
-            _sns().barplot(data=summary, x=xcol, y=pct_col, ax=ax)
+            _sns().barplot(data=summary, x=xcol, y=pct_col, color=PRISM_STYLE["bar_fill"], saturation=1, capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
             _apply_prism_axis_style(ax)
             _apply_prism_bar_style(ax)
             ax.set_ylabel("% positive"); ax.tick_params(axis="x", rotation=45); ax.set_title(f"{pct_col.replace('pct_', '')} % positive"); fig.tight_layout()
@@ -460,7 +575,7 @@ def analysis_html_document(self, summary, intensity, plate, bundle_paths):
 def analysis_notebook_dict(summary_relpath, intensity_relpath, plate_relpath, notebook_title):
     cells = [
         {"cell_type": "markdown", "metadata": {}, "source": [f"# {notebook_title}\n", "\n", "This notebook loads the CSVs exported from the desktop gating UI and provides example plots for downstream analysis.\n"]},
-        {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": ["import pandas as pd\n", "import numpy as np\n", "import matplotlib.pyplot as plt\n", "import seaborn as sns\n", "from pathlib import Path\n", "\n", "sns.set_context('talk')\n", "sns.set_style('whitegrid')\n", "plt.rcParams['axes.linewidth'] = 2.0\n", "plt.rcParams['xtick.major.width'] = 2.0\n", "plt.rcParams['ytick.major.width'] = 2.0\n", "plt.rcParams['legend.framealpha'] = 1.0\n", "plt.rcParams['legend.edgecolor'] = '#111111'\n"]},
+        {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": ["import pandas as pd\n", "import numpy as np\n", "import matplotlib.pyplot as plt\n", "import seaborn as sns\n", "from pathlib import Path\n", "\n", "sns.set_context('talk')\n", "sns.set_style('whitegrid')\n", "plt.rcParams['axes.linewidth'] = 2.0\n", "plt.rcParams['xtick.major.width'] = 2.0\n", "plt.rcParams['ytick.major.width'] = 2.0\n", "plt.rcParams['legend.framealpha'] = 1.0\n", "plt.rcParams['legend.edgecolor'] = '#111111'\n", "DEFAULT_BAR_FILL = '#9ec9ff'\n"]},
         {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": [f"summary_path = Path('{summary_relpath}')\n", f"intensity_path = Path('{intensity_relpath}')\n", f"plate_path = Path('{plate_relpath}')\n", "\n", "summary = pd.read_csv(summary_path)\n", "intensity = pd.read_csv(intensity_path)\n", "plate = pd.read_csv(plate_path) if plate_path.exists() and plate_path.stat().st_size > 0 else pd.DataFrame()\n", "\n", "summary.head()\n"]},
     ]
     return {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}, "language_info": {"name": "python", "version": "3.10"}}, "nbformat": 4, "nbformat_minor": 5}
