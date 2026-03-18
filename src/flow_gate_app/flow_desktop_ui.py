@@ -277,6 +277,7 @@ class FlowDesktopApp:
         self.heatmap_metric_var = tk.StringVar(value="")
         self.heatmap_population_var = tk.StringVar(value="__all__")
         self.heatmap_channel_var = tk.StringVar(value="")
+        self.heatmap_channel_y_var = tk.StringVar(value="")
 
         self.file_map = {}
         self.sample_cache = {}
@@ -285,6 +286,8 @@ class FlowDesktopApp:
         self.plate_metadata = {}
         self.dose_curve_definitions = {}
         self.saved_gate_labels = {}
+        self.population_labels = {"All Events": "__all__"}
+        self.heatmap_population_labels = {"All Events": "__all__"}
         self.pending_gate = None
         self.selector = None
         self.canvas_click_cid = None
@@ -438,7 +441,7 @@ class FlowDesktopApp:
         heatmap_controls = ttk.Frame(right)
         heatmap_controls.grid(row=2, column=0, sticky="ew", pady=(10, 4))
         ttk.Label(heatmap_controls, text="Well Heatmap").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(heatmap_controls, textvariable=self.heatmap_mode_var, values=["percent", "mfi"], state="readonly", width=12).grid(row=0, column=1, sticky="w", padx=8)
+        ttk.Combobox(heatmap_controls, textvariable=self.heatmap_mode_var, values=["percent", "mfi", "correlation"], state="readonly", width=12).grid(row=0, column=1, sticky="w", padx=8)
         self.heatmap_mode_var.trace_add("write", lambda *_: (self._update_heatmap_control_visibility(), self.update_heatmap()))
         self.heatmap_combo = ttk.Combobox(heatmap_controls, textvariable=self.heatmap_metric_var, state="readonly", width=28)
         self.heatmap_combo.grid(row=0, column=2, sticky="w", padx=8)
@@ -453,6 +456,11 @@ class FlowDesktopApp:
         self.heatmap_channel_combo = ttk.Combobox(heatmap_controls, textvariable=self.heatmap_channel_var, state="readonly", width=20)
         self.heatmap_channel_combo.grid(row=0, column=6, sticky="w", padx=8)
         self.heatmap_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self.update_heatmap())
+        self.heatmap_channel_y_label = ttk.Label(heatmap_controls, text="Channel Y")
+        self.heatmap_channel_y_label.grid(row=0, column=7, sticky="w", padx=(8, 0))
+        self.heatmap_channel_y_combo = ttk.Combobox(heatmap_controls, textvariable=self.heatmap_channel_y_var, state="readonly", width=20)
+        self.heatmap_channel_y_combo.grid(row=0, column=8, sticky="w", padx=8)
+        self.heatmap_channel_y_combo.bind("<<ComboboxSelected>>", lambda _e: self.update_heatmap())
         self._update_heatmap_control_visibility()
 
         heatmap_frame = ttk.Frame(right)
@@ -481,6 +489,23 @@ class FlowDesktopApp:
         if self.file_map and self.x_var.get() and self.y_var.get():
             self.plot_population()
 
+    def _population_display_parts(self, name):
+        if name == "__all__":
+            return ["All Events"]
+        lineage = self._population_lineage(name)
+        if not lineage:
+            return [name]
+        return [gate["name"] for gate in lineage]
+
+    def _population_display_label(self, name):
+        return " > ".join(self._population_display_parts(name))
+
+    def _selected_population_name(self):
+        return self.population_labels.get(self.population_var.get(), self.population_var.get())
+
+    def _selected_heatmap_population_name(self):
+        return self.heatmap_population_labels.get(self.heatmap_population_var.get(), self.heatmap_population_var.get())
+
     def _on_plot_mode_changed(self):
         if self.y_plot_mode_var.get() == "count histogram":
             self.y_var.set("Count")
@@ -494,8 +519,9 @@ class FlowDesktopApp:
         self._auto_plot_if_ready()
 
     def _update_heatmap_control_visibility(self):
-        mfi_mode = self.heatmap_mode_var.get() == "mfi"
-        if mfi_mode:
+        mode = self.heatmap_mode_var.get()
+        self.heatmap_combo.configure(state="readonly" if mode == "percent" else "disabled")
+        if mode in {"mfi", "correlation"}:
             self.heatmap_population_label.grid()
             self.heatmap_population_combo.grid()
             self.heatmap_channel_label.grid()
@@ -505,6 +531,14 @@ class FlowDesktopApp:
             self.heatmap_population_combo.grid_remove()
             self.heatmap_channel_label.grid_remove()
             self.heatmap_channel_combo.grid_remove()
+        if mode == "correlation":
+            self.heatmap_channel_label.configure(text="Channel X")
+            self.heatmap_channel_y_label.grid()
+            self.heatmap_channel_y_combo.grid()
+        else:
+            self.heatmap_channel_label.configure(text="Channel")
+            self.heatmap_channel_y_label.grid_remove()
+            self.heatmap_channel_y_combo.grid_remove()
 
     def _on_y_axis_changed(self, _event=None):
         if _is_count_axis(self.y_var.get()):
@@ -963,8 +997,34 @@ open "$TARGET_APP"
             df = df.loc[mask].copy()
         return df
 
+    def _sample_population_raw_dataframe(self, label, population_name):
+        df = self._sample_raw_dataframe(label)
+        if df.empty:
+            return df
+        for gate in self._population_lineage(population_name):
+            transformed = _apply_transform(
+                df,
+                gate["x_channel"],
+                _gate_plot_y_channel(gate),
+                gate["transform"],
+                gate["cofactor"],
+            )
+            mask = _gate_mask(transformed, gate)
+            df = df.loc[mask].copy()
+        return df
+
+    def _channel_correlation_for_label(self, label, population_name, x_channel, y_channel):
+        df = self._sample_population_raw_dataframe(label, population_name)
+        if df.empty or x_channel not in df.columns or y_channel not in df.columns:
+            return np.nan
+        corr_df = df[[x_channel, y_channel]].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(corr_df) < 2:
+            return np.nan
+        corr = corr_df[x_channel].corr(corr_df[y_channel])
+        return float(corr) if pd.notna(corr) else np.nan
+
     def _display_dataframe(self):
-        df = self._population_raw_dataframe(self.population_var.get())
+        df = self._population_raw_dataframe(self._selected_population_name())
         if df.empty:
             return df, df
         if self.y_plot_mode_var.get() == "count histogram" or _is_count_axis(self.y_var.get()):
@@ -1049,6 +1109,7 @@ open "$TARGET_APP"
 
     def _gate_label(self, gate):
         frac, count, total = self._gate_fraction(gate)
+        hierarchy = self._population_display_label(gate["name"])
         if gate["gate_type"] == "vertical":
             axes_label = f"vertical @ {gate['x_channel']}"
         elif gate["gate_type"] == "horizontal":
@@ -1057,7 +1118,7 @@ open "$TARGET_APP"
             y_channel = gate["y_channel"] if gate.get("y_channel") else gate["x_channel"]
             axes_label = f"{gate['x_channel']} vs {y_channel}"
         return (
-            f"{gate['name']} | {axes_label} | "
+            f"{hierarchy} | {axes_label} | "
             f"{100*frac:.1f}% of parent ({count}/{total})"
         )
 
@@ -1085,10 +1146,13 @@ open "$TARGET_APP"
         self.heatmap_combo["values"] = metric_cols
         if self.heatmap_metric_var.get() not in metric_cols:
             self.heatmap_metric_var.set(metric_cols[0] if metric_cols else "")
-        populations = ["__all__"] + [gate["name"] for gate in self.gates]
-        self.heatmap_population_combo["values"] = populations
-        if self.heatmap_population_var.get() not in populations:
-            self.heatmap_population_var.set("__all__")
+        population_labels = ["All Events"] + [self._population_display_label(gate["name"]) for gate in self.gates]
+        self.heatmap_population_labels = {"All Events": "__all__"}
+        for gate in self.gates:
+            self.heatmap_population_labels[self._population_display_label(gate["name"])] = gate["name"]
+        self.heatmap_population_combo["values"] = population_labels
+        if self.heatmap_population_var.get() not in population_labels:
+            self.heatmap_population_var.set("All Events")
         fluorescence_channels = [
             channel for channel in self.channel_names
             if not any(token in channel for token in ("FSC", "SSC", "Time"))
@@ -1096,6 +1160,10 @@ open "$TARGET_APP"
         self.heatmap_channel_combo["values"] = fluorescence_channels
         if self.heatmap_channel_var.get() not in fluorescence_channels:
             self.heatmap_channel_var.set(fluorescence_channels[0] if fluorescence_channels else "")
+        self.heatmap_channel_y_combo["values"] = fluorescence_channels
+        if self.heatmap_channel_y_var.get() not in fluorescence_channels:
+            fallback = fluorescence_channels[1] if len(fluorescence_channels) > 1 else (fluorescence_channels[0] if fluorescence_channels else "")
+            self.heatmap_channel_y_var.set(fallback)
 
     def update_heatmap(self):
         self.heatmap_figure.clear()
@@ -1134,26 +1202,15 @@ open "$TARGET_APP"
                     cbar_kws={"label": "% positive"},
                 )
                 self.heatmap_ax.set_title(metric.replace("pct_", "") + " well heatmap")
-            else:
-                population = self.heatmap_population_var.get()
+            elif mode == "mfi":
+                population = self._selected_heatmap_population_name()
                 channel = self.heatmap_channel_var.get()
                 if not channel:
                     self.heatmap_ax.set_title("No fluorescence channel selected")
                     self.heatmap_canvas.draw_idle()
                     return
                 for label, relpath, well in self._included_file_items():
-                    df = self._sample_raw_dataframe(label)
-                    if population != "__all__":
-                        for lineage_gate in self._population_lineage(population):
-                            transformed = _apply_transform(
-                                df,
-                                lineage_gate["x_channel"],
-                                _gate_plot_y_channel(lineage_gate),
-                                lineage_gate["transform"],
-                                lineage_gate["cofactor"],
-                            )
-                            mask = _gate_mask(transformed, lineage_gate)
-                            df = df.loc[mask].copy()
+                    df = self._sample_population_raw_dataframe(label, population)
                     value = float(np.mean(df[channel])) if (not df.empty and channel in df.columns) else np.nan
                     row_idx = ord(well[0]) - 65
                     col_idx = int(well[1:]) - 1
@@ -1166,8 +1223,38 @@ open "$TARGET_APP"
                     fmt=".1f",
                     cbar_kws={"label": f"MFI {channel}"},
                 )
-                pop_label = "all events" if population == "__all__" else population
+                pop_label = "all events" if population == "__all__" else self._population_display_label(population)
                 self.heatmap_ax.set_title(f"MFI {channel} in {pop_label}")
+            else:
+                population = self._selected_heatmap_population_name()
+                x_channel = self.heatmap_channel_var.get()
+                y_channel = self.heatmap_channel_y_var.get()
+                if not x_channel or not y_channel:
+                    self.heatmap_ax.set_title("Select two fluorescence channels")
+                    self.heatmap_canvas.draw_idle()
+                    return
+                if x_channel == y_channel:
+                    self.heatmap_ax.set_title("Correlation requires two different channels")
+                    self.heatmap_canvas.draw_idle()
+                    return
+                for label, relpath, well in self._included_file_items():
+                    value = self._channel_correlation_for_label(label, population, x_channel, y_channel)
+                    row_idx = ord(well[0]) - 65
+                    col_idx = int(well[1:]) - 1
+                    plate[row_idx, col_idx] = value
+                sns.heatmap(
+                    plate,
+                    ax=self.heatmap_ax,
+                    cmap="coolwarm",
+                    vmin=-1,
+                    vmax=1,
+                    center=0,
+                    annot=True,
+                    fmt=".2f",
+                    cbar_kws={"label": "Pearson r"},
+                )
+                pop_label = "all events" if population == "__all__" else self._population_display_label(population)
+                self.heatmap_ax.set_title(f"Correlation: {x_channel} vs {y_channel} in {pop_label}")
             self.heatmap_ax.set_xlabel("Column")
             self.heatmap_ax.set_ylabel("Row")
             self.heatmap_ax.set_xticklabels([str(i) for i in range(1, 13)], rotation=0)
@@ -1214,7 +1301,8 @@ open "$TARGET_APP"
 
         selected_gate = self._selected_saved_gate_name()
         for gate in self.gates:
-            if self.population_var.get() in {gate["parent_population"], gate["name"]}:
+            current_population = self._selected_population_name()
+            if current_population in {gate["parent_population"], gate["name"]}:
                 y_matches = gate.get("y_channel") in {None, self.y_var.get()}
                 if histogram_mode:
                     y_matches = gate["gate_type"] == "vertical"
@@ -1227,8 +1315,8 @@ open "$TARGET_APP"
             if spec is not None:
                 _render_gate(self.ax, spec, selected=True)
 
-        population_name = self.population_var.get()
-        title_name = "All Events" if population_name == "__all__" else population_name
+        population_name = self._selected_population_name()
+        title_name = self._population_display_label(population_name)
         self.ax.set_xlabel(f"{self.x_var.get()} ({self.transform_var.get()})")
         self.ax.set_ylabel("Count" if histogram_mode else f"{self.y_var.get()} ({self.transform_var.get()})")
         self.ax.set_title(f"{title_name} | {len(raw_df)} events")
@@ -1253,7 +1341,7 @@ open "$TARGET_APP"
         name = self.gate_name_var.get().strip() or f"gate_{len(self.gates) + 1}"
         spec = {
             "name": "__pending__" if preview else name,
-            "parent_population": self.population_var.get(),
+            "parent_population": self._selected_population_name(),
             "gate_type": self.pending_gate.gate_type,
             "x_channel": self.x_var.get(),
             "y_channel": None if self.pending_gate.gate_type == "vertical" else self.y_var.get(),
@@ -1363,7 +1451,7 @@ open "$TARGET_APP"
         for gate in self.gates:
             if gate["name"] != gate_name:
                 continue
-            if gate["parent_population"] != self.population_var.get():
+            if gate["parent_population"] != self._selected_population_name():
                 continue
             if gate["x_channel"] != self.x_var.get():
                 continue
@@ -1546,8 +1634,11 @@ open "$TARGET_APP"
             self.y_var.set(gate["y_channel"])
         self.transform_var.set(gate["transform"])
         self.cofactor_var.set(gate["cofactor"])
-        parent_population = gate["parent_population"] if gate["parent_population"] in self.population_combo["values"] else "__all__"
-        self.population_var.set(parent_population)
+        parent_population_label = self._population_display_label(gate["parent_population"])
+        if parent_population_label in self.population_combo["values"]:
+            self.population_var.set(parent_population_label)
+        else:
+            self.population_var.set("All Events")
         self.plot_population()
         self._update_gate_summary_panel()
 
@@ -1561,8 +1652,8 @@ open "$TARGET_APP"
             self.gate_status_var.set(f"Delete child gates first: {', '.join(children)}")
             return
         self.gates = [g for g in self.gates if g["name"] != gate_name]
-        if self.population_var.get() == gate_name:
-            self.population_var.set("__all__")
+        if self._selected_population_name() == gate_name:
+            self.population_var.set("All Events")
         self._refresh_gate_lists()
         self.redraw()
         self._update_gate_summary_panel()
@@ -1573,6 +1664,7 @@ open "$TARGET_APP"
     def _refresh_gate_lists(self, selected_name=None):
         labels = []
         self.saved_gate_labels = {}
+        self.population_labels = {"All Events": "__all__"}
         self.saved_gate_listbox.delete(0, tk.END)
         names = []
         for gate in self.gates:
@@ -1581,14 +1673,15 @@ open "$TARGET_APP"
             labels.append(label)
             self.saved_gate_labels[label] = gate["name"]
             self.saved_gate_listbox.insert(tk.END, label)
+            self.population_labels[self._population_display_label(gate["name"])] = gate["name"]
         if selected_name and selected_name in names:
             idx = names.index(selected_name)
             self.saved_gate_listbox.selection_set(idx)
 
-        population_values = ["__all__"] + names
+        population_values = ["All Events"] + [self._population_display_label(name) for name in names]
         self.population_combo["values"] = population_values
         if self.population_var.get() not in population_values:
-            self.population_var.set("__all__")
+            self.population_var.set("All Events")
 
     def save_session(self):
         filename = filedialog.asksaveasfilename(
@@ -2214,6 +2307,7 @@ open "$TARGET_APP"
         bool_cols = [c for c in intensity.columns if c.startswith("in_")]
         channel_cols = [c for c in intensity.columns if c not in metadata_cols and c not in bool_cols]
         channel_var = tk.StringVar(value=channel_cols[0] if channel_cols else "")
+        corr_channel_y_var = tk.StringVar(value=channel_cols[1] if len(channel_cols) > 1 else (channel_cols[0] if channel_cols else ""))
         gate_filter_var = tk.StringVar(value="")
         hue_dist_var = tk.StringVar(value="sample_name" if "sample_name" in intensity.columns else "well")
         sample_names = sorted({
@@ -2243,19 +2337,21 @@ open "$TARGET_APP"
         drag_status_var = tk.StringVar(value="Check one or more samples, then move them into a target group.")
 
         ttk.Label(controls, text="Plot Type").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(controls, textvariable=plot_mode_var, values=["bar", "distribution"], state="readonly", width=14).grid(row=1, column=0, padx=4)
+        ttk.Combobox(controls, textvariable=plot_mode_var, values=["bar", "distribution", "correlation"], state="readonly", width=14).grid(row=1, column=0, padx=4)
         ttk.Label(controls, text="% Positive Column").grid(row=0, column=1, sticky="w")
         ttk.Combobox(controls, textvariable=pct_col_var, values=pct_cols, state="readonly", width=28).grid(row=1, column=1, padx=4)
         ttk.Label(controls, text="Bar X").grid(row=0, column=2, sticky="w")
         ttk.Combobox(controls, textvariable=x_axis_var, values=[c for c in ["sample_name", "well", "dose_curve", "dose"] if c in summary.columns], state="readonly", width=16).grid(row=1, column=2, padx=4)
         ttk.Label(controls, text="Bar Hue").grid(row=0, column=3, sticky="w")
         ttk.Combobox(controls, textvariable=hue_var, values=["", "replicate", "sample_name", "dose_curve"], state="readonly", width=14).grid(row=1, column=3, padx=4)
-        ttk.Label(controls, text="Intensity Channel").grid(row=0, column=4, sticky="w")
+        ttk.Label(controls, text="Intensity / Corr X").grid(row=0, column=4, sticky="w")
         ttk.Combobox(controls, textvariable=channel_var, values=channel_cols, state="readonly", width=22).grid(row=1, column=4, padx=4)
         ttk.Label(controls, text="Gate Filter").grid(row=0, column=5, sticky="w")
         ttk.Combobox(controls, textvariable=gate_filter_var, values=[""] + bool_cols, state="readonly", width=22).grid(row=1, column=5, padx=4)
         ttk.Label(controls, text="Dist Hue").grid(row=0, column=6, sticky="w")
         ttk.Combobox(controls, textvariable=hue_dist_var, values=[c for c in ["sample_name", "well", "dose_curve"] if c in intensity.columns], state="readonly", width=16).grid(row=1, column=6, padx=4)
+        ttk.Label(controls, text="Corr Y").grid(row=0, column=7, sticky="w")
+        ttk.Combobox(controls, textvariable=corr_channel_y_var, values=channel_cols, state="readonly", width=22).grid(row=1, column=7, padx=4)
 
         fig = Figure(figsize=(10, 6), dpi=100)
         ax = fig.add_subplot(111)
@@ -2463,6 +2559,54 @@ open "$TARGET_APP"
                 ax.set_title("No intensity data after filtering")
                 canvas.draw_idle()
                 return
+            if mode == "correlation":
+                if not corr_channel_y_var.get() or corr_channel_y_var.get() not in intensity.columns:
+                    ax.set_title("No correlation Y channel selected")
+                    canvas.draw_idle()
+                    return
+                if channel_var.get() == corr_channel_y_var.get():
+                    ax.set_title("Choose two different channels")
+                    canvas.draw_idle()
+                    return
+                xcol = x_axis_var.get() if x_axis_var.get() in plot_df.columns else "well"
+                huecol = hue_var.get() if hue_var.get() in plot_df.columns and hue_var.get() else None
+                group_cols = [xcol] + ([huecol] if huecol and huecol != xcol else [])
+                corr_rows = []
+                for group_key, group in plot_df.groupby(group_cols, dropna=False):
+                    corr_input = group[[channel_var.get(), corr_channel_y_var.get()]].apply(pd.to_numeric, errors="coerce").dropna()
+                    if len(corr_input) < 2:
+                        corr_value = np.nan
+                    else:
+                        corr_calc = corr_input[channel_var.get()].corr(corr_input[corr_channel_y_var.get()])
+                        corr_value = float(corr_calc) if pd.notna(corr_calc) else np.nan
+                    if not isinstance(group_key, tuple):
+                        group_key = (group_key,)
+                    row = {group_cols[idx]: group_key[idx] for idx in range(len(group_cols))}
+                    row["correlation"] = corr_value
+                    corr_rows.append(row)
+                corr_df = pd.DataFrame(corr_rows).dropna(subset=["correlation"])
+                if corr_df.empty:
+                    ax.set_title("No valid correlations after filtering")
+                    canvas.draw_idle()
+                    return
+                if huecol == "sample_name":
+                    sns.barplot(
+                        data=corr_df,
+                        x=xcol,
+                        y="correlation",
+                        hue=huecol,
+                        palette=_palette_for_hue("sample_name"),
+                        ax=ax,
+                    )
+                else:
+                    sns.barplot(data=corr_df, x=xcol, y="correlation", hue=huecol, ax=ax)
+                ax.set_ylim(-1.05, 1.05)
+                ax.axhline(0, color="#666666", linewidth=1, linestyle="--")
+                ax.tick_params(axis="x", rotation=45)
+                ax.set_title(f"Correlation: {channel_var.get()} vs {corr_channel_y_var.get()}")
+                fig.tight_layout()
+                canvas.draw_idle()
+                return
             sns.kdeplot(
                 data=plot_df,
                 x=channel_var.get(),
@@ -2477,7 +2621,7 @@ open "$TARGET_APP"
             fig.tight_layout()
             canvas.draw_idle()
 
-        for var in [plot_mode_var, pct_col_var, x_axis_var, hue_var, channel_var, gate_filter_var, hue_dist_var]:
+        for var in [plot_mode_var, pct_col_var, x_axis_var, hue_var, channel_var, corr_channel_y_var, gate_filter_var, hue_dist_var]:
             var.trace_add("write", redraw_preview)
         _refresh_group_boxes()
         redraw_preview()
@@ -2592,6 +2736,31 @@ open "$TARGET_APP"
                     "    sns.kdeplot(data=plot_df, x=channel, hue=hue_col, common_norm=False, fill=False)\n",
                     "    plt.xscale('log')\n",
                     "    plt.tight_layout()\n",
+                    "\n",
+                    "def plot_channel_correlation(df, x_channel, y_channel, x='sample_name', hue=None, gate_col=None, figsize=(10, 5)):\n",
+                    "    plot_df = df.copy()\n",
+                    "    if gate_col is not None and gate_col in plot_df.columns:\n",
+                    "        plot_df = plot_df[plot_df[gate_col].astype(bool)]\n",
+                    "    group_cols = [x] + ([hue] if hue and hue in plot_df.columns and hue != x else [])\n",
+                    "    rows = []\n",
+                    "    for group_key, group in plot_df.groupby(group_cols, dropna=False):\n",
+                    "        corr_input = group[[x_channel, y_channel]].apply(pd.to_numeric, errors='coerce').dropna()\n",
+                    "        if len(corr_input) < 2:\n",
+                    "            corr_value = np.nan\n",
+                    "        else:\n",
+                    "            corr_value = corr_input[x_channel].corr(corr_input[y_channel])\n",
+                    "        if not isinstance(group_key, tuple):\n",
+                    "            group_key = (group_key,)\n",
+                    "        row = {group_cols[idx]: group_key[idx] for idx in range(len(group_cols))}\n",
+                    "        row['correlation'] = corr_value\n",
+                    "        rows.append(row)\n",
+                    "    corr_df = pd.DataFrame(rows).dropna(subset=['correlation'])\n",
+                    "    plt.figure(figsize=figsize)\n",
+                    "    sns.barplot(data=corr_df, x=x, y='correlation', hue=hue)\n",
+                    "    plt.ylim(-1.05, 1.05)\n",
+                    "    plt.axhline(0, color='0.5', linestyle='--')\n",
+                    "    plt.xticks(rotation=45, ha='right')\n",
+                    "    plt.tight_layout()\n",
                 ],
             },
             {
@@ -2637,6 +2806,17 @@ open "$TARGET_APP"
                 "source": [
                     "if channel_cols:\n",
                     "    plot_intensity_distribution(intensity, channel_cols[0])\n",
+                ],
+            },
+            {
+                "cell_type": "code",
+                "execution_count": None,
+                "metadata": {},
+                "outputs": [],
+                "source": [
+                    "# Example: correlation between the first two fluorescence channels\n",
+                    "if len(channel_cols) >= 2:\n",
+                    "    plot_channel_correlation(intensity, channel_cols[0], channel_cols[1], x='sample_name')\n",
                 ],
             },
         ]
