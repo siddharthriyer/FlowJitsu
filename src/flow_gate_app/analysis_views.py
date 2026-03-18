@@ -79,11 +79,13 @@ def open_analysis_preview(self):
     controls_outer.grid(row=0, column=0, columnspan=2, sticky="ew")
     controls_outer.columnconfigure(0, weight=1)
     controls_outer.rowconfigure(0, weight=1)
-    controls_canvas = tk.Canvas(controls_outer, highlightthickness=0, height=128)
+    controls_canvas = tk.Canvas(controls_outer, highlightthickness=0, height=172)
     controls_canvas.grid(row=0, column=0, sticky="ew")
+    controls_yscroll = ttk.Scrollbar(controls_outer, orient="vertical", command=controls_canvas.yview)
+    controls_yscroll.grid(row=0, column=1, sticky="ns")
     controls_xscroll = ttk.Scrollbar(controls_outer, orient="horizontal", command=controls_canvas.xview)
     controls_xscroll.grid(row=1, column=0, sticky="ew")
-    controls_canvas.configure(xscrollcommand=controls_xscroll.set)
+    controls_canvas.configure(xscrollcommand=controls_xscroll.set, yscrollcommand=controls_yscroll.set)
     controls = ttk.Frame(controls_canvas, padding=10)
     controls_window = controls_canvas.create_window((0, 0), window=controls, anchor="nw")
 
@@ -148,34 +150,54 @@ def open_analysis_preview(self):
     group_move_var = tk.StringVar(value="Group 1")
     drag_status_var = tk.StringVar(value="Check one or more samples, then move them into a target group.")
 
-    ttk.Label(controls, text="Plot Type").grid(row=0, column=0, sticky="w")
-    ttk.Combobox(controls, textvariable=plot_mode_var, values=["bar", "distribution", "correlation"], state="readonly", width=14).grid(row=1, column=0, padx=4)
-    ttk.Label(controls, text="% Positive Column").grid(row=0, column=1, sticky="w")
-    ttk.Combobox(controls, textvariable=pct_col_var, values=pct_cols, state="readonly", width=28).grid(row=1, column=1, padx=4)
-    ttk.Label(controls, text="Bar X").grid(row=0, column=2, sticky="w")
-    ttk.Combobox(controls, textvariable=x_axis_var, values=[c for c in ["sample_name", "well", "dose_curve", "dose"] if c in summary.columns], state="readonly", width=16).grid(row=1, column=2, padx=4)
-    ttk.Label(controls, text="Bar Hue").grid(row=0, column=3, sticky="w")
-    ttk.Combobox(controls, textvariable=hue_var, values=["", "replicate", "sample_name", "dose_curve"], state="readonly", width=14).grid(row=1, column=3, padx=4)
+    plot_type_label = ttk.Label(controls, text="Plot Type")
+    plot_type_label.grid(row=0, column=0, sticky="w")
+    plot_type_combo = ttk.Combobox(controls, textvariable=plot_mode_var, values=["bar", "distribution", "correlation"], state="readonly", width=14)
+    plot_type_combo.grid(row=1, column=0, padx=4)
+    pct_col_label = ttk.Label(controls, text="% Positive Column")
+    pct_col_label.grid(row=0, column=1, sticky="w")
+    pct_col_combo = ttk.Combobox(controls, textvariable=pct_col_var, values=pct_cols, state="readonly", width=28)
+    pct_col_combo.grid(row=1, column=1, padx=4)
+    x_axis_label = ttk.Label(controls, text="Bar X")
+    x_axis_label.grid(row=0, column=2, sticky="w")
+    x_axis_combo = ttk.Combobox(controls, textvariable=x_axis_var, values=[c for c in ["sample_name", "well", "dose_curve", "dose"] if c in summary.columns], state="readonly", width=16)
+    x_axis_combo.grid(row=1, column=2, padx=4)
+    hue_label = ttk.Label(controls, text="Bar Hue")
+    hue_label.grid(row=0, column=3, sticky="w")
+    hue_combo = ttk.Combobox(controls, textvariable=hue_var, values=["", "replicate", "sample_name", "dose_curve"], state="readonly", width=14)
+    hue_combo.grid(row=1, column=3, padx=4)
     channel_label = ttk.Label(controls, text="Intensity Channel")
     channel_label.grid(row=0, column=4, sticky="w")
     channel_combo = ttk.Combobox(controls, textvariable=channel_var, values=channel_cols, state="readonly", width=22)
     channel_combo.grid(row=1, column=4, padx=4)
-    ttk.Label(controls, text="Gate Filter").grid(row=0, column=5, sticky="w")
-    ttk.Combobox(controls, textvariable=gate_filter_var, values=[""] + bool_cols, state="readonly", width=22).grid(row=1, column=5, padx=4)
-    ttk.Label(controls, text="Dist Hue").grid(row=0, column=6, sticky="w")
-    ttk.Combobox(controls, textvariable=hue_dist_var, values=[c for c in ["sample_name", "well", "dose_curve"] if c in intensity.columns], state="readonly", width=16).grid(row=1, column=6, padx=4)
+    gate_filter_label = ttk.Label(controls, text="Gate Filter")
+    gate_filter_label.grid(row=0, column=5, sticky="w")
+    gate_filter_combo = ttk.Combobox(controls, textvariable=gate_filter_var, values=[""] + bool_cols, state="readonly", width=22)
+    gate_filter_combo.grid(row=1, column=5, padx=4)
+    hue_dist_label = ttk.Label(controls, text="Dist Hue")
+    hue_dist_label.grid(row=0, column=6, sticky="w")
+    hue_dist_combo = ttk.Combobox(controls, textvariable=hue_dist_var, values=[c for c in ["sample_name", "well", "dose_curve"] if c in intensity.columns], state="readonly", width=16)
+    hue_dist_combo.grid(row=1, column=6, padx=4)
     corr_y_label = ttk.Label(controls, text="Correlation Y")
     corr_y_label.grid(row=0, column=7, sticky="w")
     corr_y_combo = ttk.Combobox(controls, textvariable=corr_channel_y_var, values=channel_cols, state="readonly", width=22)
     corr_y_combo.grid(row=1, column=7, padx=4)
-    ttk.Label(controls, text="Bar Metric").grid(row=0, column=8, sticky="w")
-    ttk.Combobox(controls, textvariable=normalization_mode_var, values=["raw_percent", "delta_vs_negative", "fold_vs_negative", "percent_of_positive", "minmax_neg_to_pos"], state="readonly", width=20).grid(row=1, column=8, padx=4)
-    ttk.Label(controls, text="Control Compare").grid(row=0, column=9, sticky="w")
-    ttk.Combobox(controls, textvariable=control_group_var, values=["global", "x_axis", "sample_name", "dose_curve", "treatment_group", "replicate", "well"], state="readonly", width=18).grid(row=1, column=9, padx=4)
-    ttk.Label(controls, text="Negative Label").grid(row=0, column=10, sticky="w")
-    ttk.Entry(controls, textvariable=negative_control_var, width=18).grid(row=1, column=10, padx=4, sticky="ew")
-    ttk.Label(controls, text="Positive Label").grid(row=0, column=11, sticky="w")
-    ttk.Entry(controls, textvariable=positive_control_var, width=18).grid(row=1, column=11, padx=4, sticky="ew")
+    normalization_label = ttk.Label(controls, text="Bar Metric")
+    normalization_label.grid(row=0, column=8, sticky="w")
+    normalization_combo = ttk.Combobox(controls, textvariable=normalization_mode_var, values=["raw_percent", "delta_vs_negative", "fold_vs_negative", "percent_of_positive", "minmax_neg_to_pos"], state="readonly", width=20)
+    normalization_combo.grid(row=1, column=8, padx=4)
+    control_group_label = ttk.Label(controls, text="Control Compare")
+    control_group_label.grid(row=0, column=9, sticky="w")
+    control_group_combo = ttk.Combobox(controls, textvariable=control_group_var, values=["global", "x_axis", "sample_name", "dose_curve", "treatment_group", "replicate", "well"], state="readonly", width=18)
+    control_group_combo.grid(row=1, column=9, padx=4)
+    negative_label = ttk.Label(controls, text="Negative Label")
+    negative_label.grid(row=0, column=10, sticky="w")
+    negative_entry = ttk.Entry(controls, textvariable=negative_control_var, width=18)
+    negative_entry.grid(row=1, column=10, padx=4, sticky="ew")
+    positive_label = ttk.Label(controls, text="Positive Label")
+    positive_label.grid(row=0, column=11, sticky="w")
+    positive_entry = ttk.Entry(controls, textvariable=positive_control_var, width=18)
+    positive_entry.grid(row=1, column=11, padx=4, sticky="ew")
     ttk.Label(controls, text="Plot Title").grid(row=2, column=0, sticky="w", pady=(10, 0))
     ttk.Entry(controls, textvariable=plot_title_var, width=20).grid(row=3, column=0, padx=4, sticky="ew")
     ttk.Label(controls, text="X Title").grid(row=2, column=1, sticky="w", pady=(10, 0))
@@ -401,7 +423,7 @@ def open_analysis_preview(self):
         ttk.Button(button_row, text="Apply", command=_apply_settings).grid(row=0, column=0)
         ttk.Button(button_row, text="Close", command=dialog.destroy).grid(row=0, column=1, padx=(6, 0))
 
-    ttk.Button(controls, text="Advanced Settings", command=_open_advanced_settings).grid(row=1, column=8, padx=(10, 4), sticky="e")
+    ttk.Button(controls, text="Advanced Settings", command=_open_advanced_settings).grid(row=3, column=7, columnspan=2, padx=(10, 4), sticky="ew")
 
     def _apply_plot_formatting(default_title=None, default_xlabel=None, default_ylabel=None):
         title = plot_title_var.get().strip() or default_title
@@ -430,14 +452,33 @@ def open_analysis_preview(self):
 
     def _update_plot_control_visibility(*_args):
         mode = plot_mode_var.get()
-        if mode == "correlation":
-            channel_label.configure(text="Correlation X")
-            corr_y_label.grid()
-            corr_y_combo.grid()
-        else:
+        bar_widgets = [pct_col_label, pct_col_combo, x_axis_label, x_axis_combo, hue_label, hue_combo, normalization_label, normalization_combo, control_group_label, control_group_combo, negative_label, negative_entry, positive_label, positive_entry]
+        shared_channel_widgets = [channel_label, channel_combo]
+        distribution_only_widgets = [gate_filter_label, gate_filter_combo, hue_dist_label, hue_dist_combo]
+        correlation_widgets = [corr_y_label, corr_y_combo]
+        if mode == "bar":
+            for widget in bar_widgets:
+                widget.grid()
+            for widget in shared_channel_widgets + distribution_only_widgets + correlation_widgets:
+                widget.grid_remove()
+        elif mode == "distribution":
+            for widget in bar_widgets:
+                widget.grid_remove()
+            for widget in shared_channel_widgets + distribution_only_widgets:
+                widget.grid()
+            for widget in correlation_widgets:
+                widget.grid_remove()
             channel_label.configure(text="Intensity Channel")
-            corr_y_label.grid_remove()
-            corr_y_combo.grid_remove()
+        else:
+            for widget in bar_widgets:
+                widget.grid_remove()
+            for widget in shared_channel_widgets + correlation_widgets:
+                widget.grid()
+            for widget in distribution_only_widgets:
+                widget.grid_remove()
+            for widget in correlation_widgets:
+                widget.grid()
+            channel_label.configure(text="Correlation X")
 
     def _control_group_key(row, xcol):
         mode = control_group_var.get()
