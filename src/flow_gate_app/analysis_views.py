@@ -15,6 +15,9 @@ from tkinter import messagebox, ttk
 
 
 _SNS = None
+PRISM_AXIS_LINEWIDTH = 2.0
+PRISM_BAR_EDGE_LINEWIDTH = 2.0
+PRISM_LEGEND_LINEWIDTH = 1.8
 
 
 def _sns():
@@ -23,6 +26,34 @@ def _sns():
         import seaborn as sns
         _SNS = sns
     return _SNS
+
+
+def _apply_prism_axis_style(ax):
+    for side in ("left", "bottom"):
+        if side in ax.spines:
+            ax.spines[side].set_linewidth(PRISM_AXIS_LINEWIDTH)
+            ax.spines[side].set_color("#111111")
+    for side in ("top", "right"):
+        if side in ax.spines:
+            ax.spines[side].set_visible(False)
+    ax.tick_params(axis="both", which="both", width=PRISM_AXIS_LINEWIDTH, length=6, color="#111111")
+
+
+def _apply_prism_bar_style(ax):
+    for patch in getattr(ax, "patches", []):
+        patch.set_linewidth(PRISM_BAR_EDGE_LINEWIDTH)
+        patch.set_edgecolor("#111111")
+
+
+def _apply_prism_legend_style(ax):
+    legend = ax.get_legend()
+    if legend is None:
+        return
+    frame = legend.get_frame()
+    frame.set_linewidth(PRISM_LEGEND_LINEWIDTH)
+    frame.set_edgecolor("#111111")
+    frame.set_facecolor("white")
+    frame.set_alpha(1)
 
 
 def open_analysis_preview(self):
@@ -262,6 +293,9 @@ def open_analysis_preview(self):
                 ax.set_ylim(ymin if ymin is not None else current_min, ymax if ymax is not None else current_max)
         except ValueError:
             pass
+        _apply_prism_axis_style(ax)
+        _apply_prism_bar_style(ax)
+        _apply_prism_legend_style(ax)
 
     def redraw_preview(*_args):
         ax.clear()
@@ -329,7 +363,7 @@ def open_analysis_preview(self):
                 _sns().barplot(data=corr_df, x=xcol, y="correlation", hue=huecol, palette=_palette_for_hue("sample_name"), ax=ax)
             else:
                 _sns().barplot(data=corr_df, x=xcol, y="correlation", hue=huecol, ax=ax)
-            ax.set_ylim(-1.05, 1.05); ax.axhline(0, color="#666666", linewidth=1, linestyle="--"); ax.tick_params(axis="x", rotation=45)
+            ax.set_ylim(-1.05, 1.05); ax.axhline(0, color="#666666", linewidth=1.6, linestyle="--"); ax.tick_params(axis="x", rotation=45)
             _apply_plot_formatting(default_title=f"Correlation: {channel_var.get()} vs {corr_channel_y_var.get()}", default_xlabel=xcol, default_ylabel="correlation")
             fig.tight_layout(); canvas.draw_idle(); return
         _sns().kdeplot(data=plot_df, x=channel_var.get(), hue=huecol, common_norm=False, fill=False, palette=_palette_for_hue(huecol), ax=ax)
@@ -402,6 +436,8 @@ def build_html_report_sections(self, summary, intensity, plate):
             fig = Figure(figsize=(10, 4.8), dpi=100); ax = fig.add_subplot(111)
             xcol = "sample_name" if "sample_name" in summary.columns else "well"
             _sns().barplot(data=summary, x=xcol, y=pct_col, ax=ax)
+            _apply_prism_axis_style(ax)
+            _apply_prism_bar_style(ax)
             ax.set_ylabel("% positive"); ax.tick_params(axis="x", rotation=45); ax.set_title(f"{pct_col.replace('pct_', '')} % positive"); fig.tight_layout()
             sections.append(f"<section><h2>Percent Positive</h2>{html_img_tag(fig, pct_col)}</section>")
         except Exception as exc:
@@ -424,7 +460,7 @@ def analysis_html_document(self, summary, intensity, plate, bundle_paths):
 def analysis_notebook_dict(summary_relpath, intensity_relpath, plate_relpath, notebook_title):
     cells = [
         {"cell_type": "markdown", "metadata": {}, "source": [f"# {notebook_title}\n", "\n", "This notebook loads the CSVs exported from the desktop gating UI and provides example plots for downstream analysis.\n"]},
-        {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": ["import pandas as pd\n", "import numpy as np\n", "import matplotlib.pyplot as plt\n", "import seaborn as sns\n", "from pathlib import Path\n", "\n", "sns.set_context('talk')\n", "sns.set_style('whitegrid')\n"]},
+        {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": ["import pandas as pd\n", "import numpy as np\n", "import matplotlib.pyplot as plt\n", "import seaborn as sns\n", "from pathlib import Path\n", "\n", "sns.set_context('talk')\n", "sns.set_style('whitegrid')\n", "plt.rcParams['axes.linewidth'] = 2.0\n", "plt.rcParams['xtick.major.width'] = 2.0\n", "plt.rcParams['ytick.major.width'] = 2.0\n", "plt.rcParams['legend.framealpha'] = 1.0\n", "plt.rcParams['legend.edgecolor'] = '#111111'\n"]},
         {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": [f"summary_path = Path('{summary_relpath}')\n", f"intensity_path = Path('{intensity_relpath}')\n", f"plate_path = Path('{plate_relpath}')\n", "\n", "summary = pd.read_csv(summary_path)\n", "intensity = pd.read_csv(intensity_path)\n", "plate = pd.read_csv(plate_path) if plate_path.exists() and plate_path.stat().st_size > 0 else pd.DataFrame()\n", "\n", "summary.head()\n"]},
     ]
     return {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"}, "language_info": {"name": "python", "version": "3.10"}}, "nbformat": 4, "nbformat_minor": 5}

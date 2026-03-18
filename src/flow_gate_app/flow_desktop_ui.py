@@ -64,6 +64,8 @@ from .plate_views import open_plate_map_editor as _open_plate_map_editor_impl
 
 
 _SNS = None
+PRISM_AXIS_LINEWIDTH = 2.0
+PRISM_LEGEND_LINEWIDTH = 1.8
 
 
 def _sns():
@@ -72,6 +74,28 @@ def _sns():
         import seaborn as sns
         _SNS = sns
     return _SNS
+
+
+def _apply_prism_axis_style(ax):
+    for side in ("left", "bottom"):
+        if side in ax.spines:
+            ax.spines[side].set_linewidth(PRISM_AXIS_LINEWIDTH)
+            ax.spines[side].set_color("#111111")
+    for side in ("top", "right"):
+        if side in ax.spines:
+            ax.spines[side].set_visible(False)
+    ax.tick_params(axis="both", which="both", width=PRISM_AXIS_LINEWIDTH, length=6, color="#111111")
+
+
+def _apply_prism_legend_style(ax):
+    legend = ax.get_legend()
+    if legend is None:
+        return
+    frame = legend.get_frame()
+    frame.set_linewidth(PRISM_LEGEND_LINEWIDTH)
+    frame.set_edgecolor("#111111")
+    frame.set_facecolor("white")
+    frame.set_alpha(1)
 
 
 class FlowDesktopApp:
@@ -2016,6 +2040,7 @@ open "$TARGET_APP"
             self.heatmap_ax.set_ylabel("Row")
             self.heatmap_ax.set_xticklabels([str(i) for i in range(1, 13)], rotation=0)
             self.heatmap_ax.set_yticklabels(list("ABCDEFGH"), rotation=0)
+            _apply_prism_axis_style(self.heatmap_ax)
             self.heatmap_figure.tight_layout()
             self.heatmap_canvas.draw_idle()
         except Exception as exc:
@@ -2077,6 +2102,8 @@ open "$TARGET_APP"
         self.ax.set_xlabel(f"{self.x_var.get()} ({self.transform_var.get()})")
         self.ax.set_ylabel("Count" if histogram_mode else f"{self.y_var.get()} ({self.transform_var.get()})")
         self.ax.set_title(f"{title_name} | {len(raw_df)} events")
+        _apply_prism_axis_style(self.ax)
+        _apply_prism_legend_style(self.ax)
         self.figure.tight_layout()
         self.canvas.draw_idle()
 
@@ -2327,6 +2354,8 @@ open "$TARGET_APP"
             self.drag_state = None
             self.mode_var.set("MODE: idle")
             self.canvas.get_tk_widget().configure(cursor="")
+            if changed:
+                self._invalidate_computation_cache()
             self._update_gate_summary_panel()
             if changed:
                 self.redo_stack.clear()

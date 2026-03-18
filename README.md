@@ -54,11 +54,17 @@ The app can generate a dated notebook that loads those CSVs and includes example
 - dose curves
 - fluorescence intensity distributions
 
+The analysis preview and exported report plots use a heavier GraphPad Prism-like visual treatment:
+
+- thicker axis lines
+- thick bar outlines
+- thicker legend box outlines
+
 ### Update Checks
 
 The desktop UI includes a `Check for Updates` button. It queries the latest GitHub Release for `siddharthriyer/FlowJitsu`, compares that release tag to the local app version, and can:
 
-- download the recommended release asset into `~/Downloads/FlowGateAppUpdates/`
+- download the recommended release asset into `~/Downloads/FlowJitsuUpdates/`
 - open the GitHub release page
 - report when the app is already current
 
@@ -160,7 +166,7 @@ Or build using a different conda env:
 This uses PyInstaller and creates:
 
 ```text
-dist/FlowGateApp.app
+dist/FlowJitsu.app
 ```
 
 ### Runtime Data Location
@@ -168,7 +174,7 @@ dist/FlowGateApp.app
 When run as a bundled app, session files, exports, and generated notebooks are written to:
 
 ```text
-~/Library/Application Support/FlowGateApp/
+~/Library/Application Support/FlowJitsu/
 ```
 
 This avoids trying to write inside the `.app` bundle itself.
@@ -179,17 +185,17 @@ The simplest update model is:
 
 1. bump the package version in `pyproject.toml`
 2. rebuild the app with `./build_macos_app.sh`
-3. distribute the new `FlowGateApp.app`
+3. distribute the new `FlowJitsu.app`
 4. users replace their old app bundle with the new one
 
-Their exported data and saved sessions stay in `~/Library/Application Support/FlowGateApp/`, so replacing the app bundle should not wipe their working state.
+Their exported data and saved sessions stay in `~/Library/Application Support/FlowJitsu/`, so replacing the app bundle should not wipe their working state.
 
 ### Standalone App Update Script
 
 To replace an installed app bundle with a new build:
 
 ```bash
-./update_macos_app.sh /path/to/FlowGateApp.app
+./update_macos_app.sh /path/to/FlowJitsu.app
 ```
 
 By default this installs into `/Applications`.
@@ -197,13 +203,13 @@ By default this installs into `/Applications`.
 To install into a user-local applications folder instead:
 
 ```bash
-./update_macos_app.sh /path/to/FlowGateApp.app ~/Applications
+./update_macos_app.sh /path/to/FlowJitsu.app ~/Applications
 ```
 
 This script replaces the app bundle only. It does not delete user sessions or exports, because those live under:
 
 ```text
-~/Library/Application Support/FlowGateApp/
+~/Library/Application Support/FlowJitsu/
 ```
 
 ## Wheel Distribution Workflow
@@ -305,7 +311,7 @@ Artifacts produced by the workflow:
 
 - Python wheel
 - source tarball
-- `FlowGateApp-macos.zip`
+- `FlowJitsu-macos.zip`
 - `SHA256SUMS.txt`
 
 ## Local Release Build
@@ -328,7 +334,7 @@ This will:
 The easiest update path is:
 
 1. publish a new GitHub Release
-2. labmates download the newest wheel or `FlowGateApp-macos.zip`
+2. labmates download the newest wheel or `FlowJitsu-macos.zip`
 3. they either:
    - install the new wheel with `install_flow_gate_wheel.sh`
    - or replace the macOS app with `update_macos_app.sh`
