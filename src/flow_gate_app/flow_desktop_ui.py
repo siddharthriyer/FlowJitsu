@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from urllib.error import HTTPError
 import urllib.request
 import webbrowser
 import zipfile
@@ -1072,6 +1073,19 @@ open "$TARGET_APP"
                     f"Latest: {latest_tag or current_tag}",
                 )
                 self.status_var.set(f"Up to date: {current_tag}")
+        except HTTPError as exc:
+            if exc.code == 404:
+                self.status_var.set("Update check failed: GitHub returned 404")
+                messagebox.showerror(
+                    "Update Check Failed",
+                    "Update check failed with HTTP 404.\n\n"
+                    "This usually means the GitHub repo or release assets are not publicly accessible from this machine. "
+                    "GitHub returns 404 for private release endpoints when accessed without authentication.\n\n"
+                    "For labmates to use in-app update checks, the release assets need to be publicly reachable or hosted "
+                    "through a different update endpoint.",
+                )
+                return
+            self.status_var.set(f"Update check failed: HTTPError {exc.code}")
         except Exception as exc:
             self.status_var.set(f"Update check failed: {type(exc).__name__}: {exc}")
 
