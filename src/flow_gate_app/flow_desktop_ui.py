@@ -823,22 +823,6 @@ open "$TARGET_APP"
         self.redraw()
         self.update_heatmap()
 
-    def _initialize_gates_from_last_session(self):
-        if self.gates or not os.path.isfile(self.last_session_path):
-            return
-        try:
-            with open(self.last_session_path) as fh:
-                payload = json.load(fh)
-            gates = payload.get("gates", [])
-            if gates:
-                self.gates = gates
-                self._refresh_gate_lists()
-                self._update_gate_summary_panel()
-                self._refresh_heatmap_options()
-                self.gate_status_var.set("Initialized gates from last session.")
-        except Exception:
-            return
-
     def load_folder(self):
         folder = self.folder_var.get().strip()
         if not os.path.isdir(folder):
@@ -866,7 +850,6 @@ open "$TARGET_APP"
             if self.file_map:
                 self.well_listbox.selection_set(0)
                 self._prime_channels()
-                self._initialize_gates_from_last_session()
                 self.status_var.set(f"Loaded {len(self.file_map)} wells. Click Plot Population to load events.")
             else:
                 self.channel_names = []
