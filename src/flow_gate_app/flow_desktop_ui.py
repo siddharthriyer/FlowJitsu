@@ -24,7 +24,7 @@ from matplotlib.figure import Figure
 from matplotlib.path import Path
 from matplotlib.widgets import PolygonSelector
 import tkinter as tk
-from tkinter import colorchooser, filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
 from ._app_version import __version__
 
@@ -277,7 +277,10 @@ class FlowDesktopApp:
         self.root.title(f"Flow Gate Desktop v{__version__}")
         self.root.geometry("1440x840")
 
-        self.folder_var = tk.StringVar(value=self.base_dir)
+        self.home_folder = self._load_home_folder()
+        initial_folder = self.home_folder or self.base_dir
+
+        self.folder_var = tk.StringVar(value=initial_folder)
         self.instrument_var = tk.StringVar(value=instrument)
         self.population_var = tk.StringVar(value="__all__")
         self.x_var = tk.StringVar()
@@ -294,11 +297,14 @@ class FlowDesktopApp:
         self.status_var = tk.StringVar(value="Choose a folder and click Load Folder.")
         self.gate_status_var = tk.StringVar(value="")
         self.version_var = tk.StringVar(value=f"Version {__version__}")
+        self.autosave_var = tk.StringVar(value="Autosave: idle")
         self.heatmap_mode_var = tk.StringVar(value="percent")
         self.heatmap_metric_var = tk.StringVar(value="")
         self.heatmap_population_var = tk.StringVar(value="__all__")
         self.heatmap_channel_var = tk.StringVar(value="")
         self.heatmap_channel_y_var = tk.StringVar(value="")
+        self.heatmap_title_var = tk.StringVar(value="")
+        self.recent_session_var = tk.StringVar(value="")
 
         self.file_map = {}
         self.sample_cache = {}
@@ -320,6 +326,11 @@ class FlowDesktopApp:
         self.current_transformed = pd.DataFrame()
         self.color_cycle = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
         self.gate_group_counter = 0
+        self.undo_stack = []
+        self.redo_stack = []
+        self.history_limit = 40
+        self.suspend_history = False
+        self.autosave_after_id = None
         self.last_session_path = self._last_session_path()
 
         self.figure = Figure(figsize=(8, 7), dpi=100)
@@ -327,10 +338,42 @@ class FlowDesktopApp:
         self.heatmap_figure = Figure(figsize=(8, 3.8), dpi=100)
         self.heatmap_ax = self.heatmap_figure.add_subplot(111)
 
+        self._init_styles()
         self._build_ui()
+        self._refresh_recent_sessions()
         self._bind_events()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
         self._update_gate_mode_visibility()
         self._autoload_last_session_or_folder(base_dir)
+
+    def _init_styles(self):
+        self.style = ttk.Style(self.root)
+        self.style.configure("Section.TLabelframe.Label", font=("TkDefaultFont", 10, "bold"))
+
+    def _panel_button(self, parent, text, command, bg, fg="#1d1d1f", **grid_kwargs):
+        button = tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=bg,
+            fg=fg,
+            activebackground=bg,
+            activeforeground=fg,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            padx=10,
+            pady=6,
+        )
+        if grid_kwargs:
+            button.grid(**grid_kwargs)
+        return button
+
+    def _accent_button(self, parent, text, command, bg, fg="#1d1d1f", **grid_kwargs):
+        return self._panel_button(parent, text, command, bg=bg, fg=fg, **grid_kwargs)
+
+    def _secondary_button(self, parent, text, command, **grid_kwargs):
+        return self._panel_button(parent, text, command, bg="#3c4353", fg="#1d1d1f", **grid_kwargs)
 
     def _build_ui(self):
         self.root.columnconfigure(1, weight=1)
@@ -349,8 +392,7 @@ class FlowDesktopApp:
 
         left = ttk.Frame(left_canvas, padding=0)
         left_window = left_canvas.create_window((0, 0), window=left, anchor="nw")
-        for col in range(3):
-            left.columnconfigure(col, weight=1)
+        left.columnconfigure(0, weight=1)
 
         def _sync_left_scroll(_event=None):
             left_canvas.configure(scrollregion=left_canvas.bbox("all"))
@@ -370,83 +412,113 @@ class FlowDesktopApp:
         right.rowconfigure(1, weight=1)
         right.rowconfigure(3, weight=0)
 
-        ttk.Label(left, text="Folder").grid(row=0, column=0, sticky="w")
-        ttk.Entry(left, textvariable=self.folder_var, width=52).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 6))
-        ttk.Button(left, text="Browse", command=self.browse_folder).grid(row=2, column=0, sticky="ew")
-        ttk.Combobox(left, textvariable=self.instrument_var, values=["Cytoflex", "Symphony"], state="readonly", width=14).grid(row=2, column=1, sticky="ew", padx=4)
-        ttk.Button(left, text="Load Folder", command=self.load_folder).grid(row=2, column=2, sticky="ew")
+        def section(parent, title):
+            frame = ttk.LabelFrame(parent, text=title, padding=(10, 8), style="Section.TLabelframe")
+            frame.pack(fill="x", expand=True, pady=(0, 10))
+            return frame
 
-        ttk.Label(left, text="Wells").grid(row=3, column=0, sticky="w", pady=(10, 0))
-        self.well_listbox = tk.Listbox(left, selectmode=tk.EXTENDED, width=48, height=18, exportselection=False)
-        self.well_listbox.grid(row=4, column=0, columnspan=3, sticky="nsew")
+        def config_grid(frame, cols):
+            for idx in range(cols):
+                frame.columnconfigure(idx, weight=1)
 
-        ttk.Label(left, text="Population").grid(row=5, column=0, sticky="w", pady=(10, 0))
-        self.population_combo = ttk.Combobox(left, textvariable=self.population_var, state="readonly", width=22)
-        self.population_combo.grid(row=6, column=0, sticky="ew")
+        data_frame = section(left, "Data")
+        config_grid(data_frame, 3)
+        ttk.Label(data_frame, text="Folder").grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Entry(data_frame, textvariable=self.folder_var, width=52).grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        self._secondary_button(data_frame, "Browse", self.browse_folder, row=2, column=0, sticky="ew")
+        ttk.Combobox(data_frame, textvariable=self.instrument_var, values=["Cytoflex", "Symphony"], state="readonly", width=14).grid(row=2, column=1, sticky="ew", padx=4)
+        self._accent_button(data_frame, "Load Folder", self.load_folder, bg="#4869d6", fg="#1d1d1f", row=2, column=2, sticky="ew")
+        self._secondary_button(data_frame, "Set Home", self.set_home_folder, row=3, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(data_frame, textvariable=self._home_folder_label_textvar(), wraplength=470).grid(row=3, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Label(data_frame, text="Wells").grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.well_listbox = tk.Listbox(data_frame, selectmode=tk.EXTENDED, width=48, height=12, exportselection=False)
+        self.well_listbox.grid(row=5, column=0, columnspan=3, sticky="ew")
 
-        ttk.Label(left, text="Max Points").grid(row=5, column=1, sticky="w", pady=(10, 0))
-        ttk.Spinbox(left, from_=1000, to=50000, increment=1000, textvariable=self.max_points_var, width=10).grid(row=6, column=1, sticky="ew", padx=4)
-        self.plot_button = ttk.Button(left, text="Plot Population", command=self.plot_population)
-        self.plot_button.grid(row=6, column=2, sticky="ew")
+        plot_frame = section(left, "Plot")
+        config_grid(plot_frame, 3)
+        ttk.Label(plot_frame, text="Population").grid(row=0, column=0, sticky="w")
+        ttk.Label(plot_frame, text="Max Points").grid(row=0, column=1, sticky="w")
+        ttk.Label(plot_frame, text="").grid(row=0, column=2, sticky="w")
+        self.population_combo = ttk.Combobox(plot_frame, textvariable=self.population_var, state="readonly", width=22)
+        self.population_combo.grid(row=1, column=0, sticky="ew")
+        ttk.Spinbox(plot_frame, from_=1000, to=50000, increment=1000, textvariable=self.max_points_var, width=10).grid(row=1, column=1, sticky="ew", padx=4)
+        self.plot_button = self._accent_button(plot_frame, "Plot Population", self.plot_population, bg="#4869d6", fg="#1d1d1f", row=1, column=2, sticky="ew")
+        ttk.Label(plot_frame, text="X Axis").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(plot_frame, text="Y Axis").grid(row=2, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(plot_frame, text="Plot Mode").grid(row=2, column=2, sticky="w", pady=(10, 0))
+        self.x_combo = ttk.Combobox(plot_frame, textvariable=self.x_var, state="readonly", width=20)
+        self.x_combo.grid(row=3, column=0, sticky="ew")
+        self.y_combo = ttk.Combobox(plot_frame, textvariable=self.y_var, state="readonly", width=20)
+        self.y_combo.grid(row=3, column=1, sticky="ew", padx=4)
+        ttk.Combobox(plot_frame, textvariable=self.y_plot_mode_var, values=["scatter", "count histogram"], state="readonly", width=16).grid(row=3, column=2, sticky="ew")
+        ttk.Label(plot_frame, text="Transform").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(plot_frame, text="Cofactor").grid(row=4, column=1, sticky="w", pady=(10, 0))
+        ttk.Combobox(plot_frame, textvariable=self.transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=5, column=0, sticky="ew")
+        ttk.Spinbox(plot_frame, from_=1.0, to=10000.0, increment=10.0, textvariable=self.cofactor_var, width=12).grid(row=5, column=1, sticky="ew", padx=4)
 
-        ttk.Label(left, text="X Axis").grid(row=7, column=0, sticky="w", pady=(10, 0))
-        self.x_combo = ttk.Combobox(left, textvariable=self.x_var, state="readonly", width=20)
-        self.x_combo.grid(row=8, column=0, sticky="ew")
-
-        ttk.Label(left, text="Y Axis").grid(row=7, column=1, sticky="w", pady=(10, 0))
-        self.y_combo = ttk.Combobox(left, textvariable=self.y_var, state="readonly", width=20)
-        self.y_combo.grid(row=8, column=1, sticky="ew", padx=4)
-        ttk.Label(left, text="Plot Mode").grid(row=7, column=2, sticky="w", pady=(10, 0))
-        ttk.Combobox(left, textvariable=self.y_plot_mode_var, values=["scatter", "count histogram"], state="readonly", width=16).grid(row=8, column=2, sticky="ew")
-
-        ttk.Label(left, text="Transform").grid(row=9, column=0, sticky="w", pady=(10, 0))
-        ttk.Combobox(left, textvariable=self.transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=10, column=0, sticky="ew")
-
-        ttk.Label(left, text="Cofactor").grid(row=9, column=1, sticky="w", pady=(10, 0))
-        ttk.Spinbox(left, from_=1.0, to=10000.0, increment=10.0, textvariable=self.cofactor_var, width=12).grid(row=10, column=1, sticky="ew", padx=4)
-
-        ttk.Label(left, text="Gate Type").grid(row=11, column=0, sticky="w", pady=(10, 0))
-        ttk.Combobox(left, textvariable=self.gate_type_var, values=["polygon", "quad", "vertical", "horizontal"], state="readonly", width=15).grid(row=12, column=0, sticky="ew")
-
-        ttk.Label(left, text="Gate Name").grid(row=11, column=1, sticky="w", pady=(10, 0))
-        ttk.Entry(left, textvariable=self.gate_name_var, width=18).grid(row=12, column=1, sticky="ew", padx=4)
-
-        self.quad_region_combo = ttk.Combobox(left, textvariable=self.quad_region_var, values=["top right", "top left", "bottom right", "bottom left"], state="readonly", width=15)
-        self.quad_region_combo.grid(row=13, column=0, sticky="ew", pady=(6, 0))
-
-        self.threshold_region_combo = ttk.Combobox(left, textvariable=self.threshold_region_var, values=["above", "below"], state="readonly", width=15)
-        self.threshold_region_combo.grid(row=13, column=1, sticky="ew", padx=4, pady=(6, 0))
-
-        self.start_draw_button = ttk.Button(left, text="Start Drawing", command=self.start_drawing)
-        self.start_draw_button.grid(row=14, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(left, text="Clear Pending", command=self.clear_pending).grid(row=14, column=1, sticky="ew", padx=4, pady=(8, 0))
-        ttk.Button(left, text="Save Gate", command=self.save_gate).grid(row=14, column=2, sticky="ew", pady=(8, 0))
-
-        ttk.Label(left, text="Saved Gates").grid(row=15, column=0, sticky="w", pady=(10, 0))
-        self.saved_gate_listbox = tk.Listbox(left, selectmode=tk.SINGLE, width=48, height=10, exportselection=False)
-        self.saved_gate_listbox.grid(row=16, column=0, columnspan=3, sticky="ew")
-        ttk.Label(left, text="Gate Percentages By Well").grid(row=17, column=0, sticky="w", pady=(8, 0))
-        self.gate_summary_text = tk.Text(left, width=52, height=5, wrap="word")
-        self.gate_summary_text.grid(row=18, column=0, columnspan=3, sticky="ew")
+        gate_frame = section(left, "Gating")
+        config_grid(gate_frame, 3)
+        ttk.Label(gate_frame, text="Gate Type").grid(row=0, column=0, sticky="w")
+        ttk.Label(gate_frame, text="Gate Name").grid(row=0, column=1, sticky="w")
+        ttk.Label(gate_frame, text="Threshold / Region").grid(row=0, column=2, sticky="w")
+        ttk.Combobox(gate_frame, textvariable=self.gate_type_var, values=["polygon", "quad", "vertical", "horizontal"], state="readonly", width=15).grid(row=1, column=0, sticky="ew")
+        ttk.Entry(gate_frame, textvariable=self.gate_name_var, width=18).grid(row=1, column=1, sticky="ew", padx=4)
+        mode_detail = ttk.Frame(gate_frame)
+        mode_detail.grid(row=1, column=2, sticky="ew")
+        mode_detail.columnconfigure(0, weight=1)
+        self.quad_region_combo = ttk.Combobox(mode_detail, textvariable=self.quad_region_var, values=["top right", "top left", "bottom right", "bottom left"], state="readonly", width=15)
+        self.quad_region_combo.grid(row=0, column=0, sticky="ew")
+        self.threshold_region_combo = ttk.Combobox(mode_detail, textvariable=self.threshold_region_var, values=["above", "below"], state="readonly", width=15)
+        self.threshold_region_combo.grid(row=0, column=0, sticky="ew")
+        self.start_draw_button = self._accent_button(gate_frame, "Start Drawing", self.start_drawing, bg="#3f7f4d", fg="#1d1d1f", row=2, column=0, sticky="ew", pady=(8, 0))
+        self._secondary_button(gate_frame, "Clear Pending", self.clear_pending, row=2, column=1, sticky="ew", padx=4, pady=(8, 0))
+        self._accent_button(gate_frame, "Save Gate", self.save_gate, bg="#2f8c74", fg="#1d1d1f", row=2, column=2, sticky="ew", pady=(8, 0))
+        ttk.Label(gate_frame, text="Saved Gates").grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.saved_gate_listbox = tk.Listbox(gate_frame, selectmode=tk.SINGLE, width=48, height=8, exportselection=False)
+        self.saved_gate_listbox.grid(row=4, column=0, columnspan=3, sticky="ew")
+        ttk.Label(gate_frame, text="Gate Percentages By Well").grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.gate_summary_text = tk.Text(gate_frame, width=52, height=5, wrap="word")
+        self.gate_summary_text.grid(row=6, column=0, columnspan=3, sticky="ew")
         self.gate_summary_text.configure(state="disabled")
+        ttk.Label(gate_frame, text="Gate Statistics").grid(row=7, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.gate_stats_text = tk.Text(gate_frame, width=52, height=6, wrap="word")
+        self.gate_stats_text.grid(row=8, column=0, columnspan=3, sticky="ew")
+        self.gate_stats_text.configure(state="disabled")
+        gate_actions = ttk.Frame(gate_frame)
+        gate_actions.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        for idx in range(4):
+            gate_actions.columnconfigure(idx, weight=1)
+        self._secondary_button(gate_actions, "Delete Gate", self.delete_gate, row=0, column=0, sticky="ew")
+        self._secondary_button(gate_actions, "Rename Gate", self.rename_selected_gate, row=0, column=1, sticky="ew", padx=(6, 0))
+        self._secondary_button(gate_actions, "Set Color", self.recolor_selected_gate, row=0, column=2, sticky="ew", padx=(6, 0))
+        self._secondary_button(gate_actions, "Plate Map", self.open_plate_map_editor, row=0, column=3, sticky="ew", padx=(6, 0))
 
-        ttk.Button(left, text="Delete Gate", command=self.delete_gate).grid(row=19, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(left, text="Save Session", command=self.save_session).grid(row=19, column=1, sticky="ew", padx=4, pady=(8, 0))
-        ttk.Button(left, text="Load Session", command=self.load_session).grid(row=19, column=2, sticky="ew", pady=(8, 0))
+        analysis_frame = section(left, "Analysis And Export")
+        config_grid(analysis_frame, 2)
+        self._secondary_button(analysis_frame, "Analysis Preview", self.open_analysis_preview, row=0, column=0, sticky="ew")
+        self._accent_button(analysis_frame, "Export HTML Report", self.export_html_report, bg="#8c6a2f", fg="#1d1d1f", row=0, column=1, sticky="ew", padx=(6, 0))
+        self._secondary_button(analysis_frame, "Open Analysis Notebook", self.create_and_open_analysis_notebook, row=1, column=0, sticky="ew", pady=(6, 0))
+        self._secondary_button(analysis_frame, "Excluded Wells", self.open_exclusion_editor, row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        self._secondary_button(analysis_frame, "Export Summary CSV", self.export_gate_summary_csv, row=2, column=0, sticky="ew", pady=(6, 0))
+        self._secondary_button(analysis_frame, "Export Intensities CSV", self.export_intensity_csv, row=2, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
 
-        ttk.Button(left, text="Plate Map", command=self.open_plate_map_editor).grid(row=20, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(left, text="Excluded Wells", command=self.open_exclusion_editor).grid(row=20, column=1, sticky="ew", padx=4, pady=(8, 0))
-        ttk.Button(left, text="Export Summary CSV", command=self.export_gate_summary_csv).grid(row=20, column=2, sticky="ew", pady=(8, 0))
-        ttk.Button(left, text="Export Intensities CSV", command=self.export_intensity_csv).grid(row=21, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(left, text="Analysis Preview", command=self.open_analysis_preview).grid(row=21, column=1, sticky="ew", padx=4, pady=(8, 0))
-        ttk.Button(left, text="Open Analysis Notebook", command=self.create_and_open_analysis_notebook).grid(row=21, column=2, sticky="ew", pady=(8, 0))
-        ttk.Button(left, text="Export HTML Report", command=self.export_html_report).grid(row=22, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(left, text="Check for Updates", command=self.check_for_updates).grid(row=22, column=1, sticky="ew", padx=4, pady=(8, 0))
-        ttk.Label(left, textvariable=self.version_var).grid(row=22, column=2, sticky="w", padx=4, pady=(8, 0))
+        session_frame = section(left, "Session")
+        config_grid(session_frame, 2)
+        self._secondary_button(session_frame, "Undo", self.undo_last_change, row=0, column=0, sticky="ew")
+        self._secondary_button(session_frame, "Redo", self.redo_last_change, row=0, column=1, sticky="ew", padx=(6, 0))
+        self._secondary_button(session_frame, "Save Session", self.save_session, row=1, column=0, sticky="ew", pady=(6, 0))
+        self._secondary_button(session_frame, "Load Session", self.load_session, row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        self.recent_session_combo = ttk.Combobox(session_frame, textvariable=self.recent_session_var, state="readonly", width=40)
+        self.recent_session_combo.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        self._secondary_button(session_frame, "Open Recent", self.load_recent_session, row=2, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        self._secondary_button(session_frame, "Check for Updates", self.check_for_updates, row=3, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(session_frame, textvariable=self.version_var).grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        ttk.Label(session_frame, textvariable=self.autosave_var, wraplength=470).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        ttk.Label(left, textvariable=self.mode_var, wraplength=480).grid(row=23, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Label(left, textvariable=self.status_var, wraplength=480).grid(row=24, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        ttk.Label(left, textvariable=self.gate_status_var, wraplength=480).grid(row=25, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        status_frame = section(left, "Status")
+        ttk.Label(status_frame, textvariable=self.mode_var, wraplength=470).pack(anchor="w")
+        ttk.Label(status_frame, textvariable=self.status_var, wraplength=470).pack(anchor="w", pady=(6, 0))
+        ttk.Label(status_frame, textvariable=self.gate_status_var, wraplength=470).pack(anchor="w", pady=(6, 0))
 
         ttk.Label(right, text="Interactive Plot").grid(row=0, column=0, sticky="w")
         canvas_frame = ttk.Frame(right)
@@ -483,6 +555,10 @@ class FlowDesktopApp:
         self.heatmap_channel_y_combo = ttk.Combobox(heatmap_controls, textvariable=self.heatmap_channel_y_var, state="readonly", width=20)
         self.heatmap_channel_y_combo.grid(row=0, column=8, sticky="w", padx=8)
         self.heatmap_channel_y_combo.bind("<<ComboboxSelected>>", lambda _e: self.update_heatmap())
+        ttk.Label(heatmap_controls, text="Title").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(heatmap_controls, textvariable=self.heatmap_title_var, width=40).grid(row=1, column=1, columnspan=3, sticky="ew", padx=8, pady=(8, 0))
+        self._secondary_button(heatmap_controls, "Save Heatmap", self.save_heatmap, row=1, column=4, sticky="w", padx=8, pady=(8, 0))
+        self.heatmap_title_var.trace_add("write", lambda *_: self.update_heatmap())
         self._update_heatmap_control_visibility()
 
         heatmap_frame = ttk.Frame(right)
@@ -514,6 +590,10 @@ class FlowDesktopApp:
     def _population_display_parts(self, name):
         if name == "__all__":
             return ["All Events"]
+        if self._is_boolean_population(name):
+            parent_name, gate_names = self._boolean_population_spec(name)
+            parent_parts = self._population_display_parts(parent_name)
+            return parent_parts + [" AND ".join(gate_names)]
         lineage = self._population_lineage(name)
         if not lineage:
             return [name]
@@ -527,6 +607,46 @@ class FlowDesktopApp:
 
     def _selected_heatmap_population_name(self):
         return self.heatmap_population_labels.get(self.heatmap_population_var.get(), self.heatmap_population_var.get())
+
+    def _boolean_population_name(self, parent_name, gate_names):
+        return f"__bool__::{parent_name}::{'&&'.join(gate_names)}"
+
+    def _is_boolean_population(self, name):
+        return isinstance(name, str) and name.startswith("__bool__::")
+
+    def _boolean_population_spec(self, name):
+        if not self._is_boolean_population(name):
+            return None, []
+        remainder = name[len("__bool__::"):]
+        parent_name, gates_part = remainder.split("::", 1)
+        gate_names = [item for item in gates_part.split("&&") if item]
+        return parent_name, gate_names
+
+    def _boolean_population_defs(self):
+        defs = []
+        sibling_groups = {}
+        fluorescent = {gate["name"]: gate for gate in self._fluorescence_gates()}
+        for gate in self.gates:
+            if gate["name"] not in fluorescent:
+                continue
+            sibling_groups.setdefault(gate["parent_population"], []).append(gate)
+        for parent_name, group in sibling_groups.items():
+            group = sorted(group, key=lambda g: g["name"])
+            for idx in range(len(group)):
+                for jdx in range(idx + 1, len(group)):
+                    first = group[idx]
+                    second = group[jdx]
+                    if first["name"] == second["name"]:
+                        continue
+                    if first["x_channel"] == second["x_channel"] and first.get("y_channel") == second.get("y_channel"):
+                        continue
+                    gate_names = [first["name"], second["name"]]
+                    defs.append({
+                        "name": self._boolean_population_name(parent_name, gate_names),
+                        "parent_population": parent_name,
+                        "gate_names": gate_names,
+                    })
+        return defs
 
     def _on_plot_mode_changed(self):
         if self.y_plot_mode_var.get() == "count histogram":
@@ -562,6 +682,24 @@ class FlowDesktopApp:
             self.heatmap_channel_y_label.grid_remove()
             self.heatmap_channel_y_combo.grid_remove()
 
+    def _effective_heatmap_title(self, default_title):
+        custom = self.heatmap_title_var.get().strip()
+        return custom or default_title
+
+    def save_heatmap(self):
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), ("SVG files", "*.svg")],
+            initialfile="flow_well_heatmap.png",
+        )
+        if not filename:
+            return
+        try:
+            self.heatmap_figure.savefig(filename, dpi=200, bbox_inches="tight")
+            self.status_var.set(f"Saved heatmap to {filename}")
+        except Exception as exc:
+            self.status_var.set(f"Failed to save heatmap: {type(exc).__name__}: {exc}")
+
     def _on_y_axis_changed(self, _event=None):
         if _is_count_axis(self.y_var.get()):
             self.y_plot_mode_var.set("count histogram")
@@ -583,7 +721,8 @@ class FlowDesktopApp:
             self.threshold_region_combo.grid_remove()
 
     def browse_folder(self):
-        folder = filedialog.askdirectory(initialdir=_preferred_data_dir(self.folder_var.get() or self.base_dir))
+        initial_dir = self.folder_var.get() or self.home_folder or self.base_dir
+        folder = filedialog.askdirectory(initialdir=_preferred_data_dir(initial_dir))
         if folder:
             self.folder_var.set(folder)
 
@@ -853,8 +992,221 @@ open "$TARGET_APP"
         os.makedirs(session_dir, exist_ok=True)
         return session_dir
 
+    def _settings_path(self):
+        return os.path.join(self._app_home(), "settings.json")
+
+    def _load_settings(self):
+        settings_path = self._settings_path()
+        if os.path.isfile(settings_path):
+            try:
+                with open(settings_path) as fh:
+                    data = json.load(fh)
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    def _save_settings(self, settings):
+        with open(self._settings_path(), "w") as fh:
+            json.dump(settings, fh, indent=2)
+
+    def _load_home_folder(self):
+        home_folder = self._load_settings().get("home_folder", "")
+        if home_folder and os.path.isdir(home_folder):
+            return home_folder
+        return ""
+
+    def _recent_sessions(self):
+        settings = self._load_settings()
+        recent = settings.get("recent_sessions", [])
+        return [path for path in recent if isinstance(path, str) and os.path.isfile(path)]
+
+    def _remember_recent_session(self, path):
+        if not path:
+            return
+        path = os.path.abspath(path)
+        recent = [item for item in self._recent_sessions() if os.path.abspath(item) != path]
+        recent.insert(0, path)
+        settings = self._load_settings()
+        settings["recent_sessions"] = recent[:12]
+        self._save_settings(settings)
+        self._refresh_recent_sessions()
+
+    def _refresh_recent_sessions(self):
+        recent = self._recent_sessions()
+        if hasattr(self, "recent_session_var"):
+            combo = getattr(self, "recent_session_combo", None)
+            if combo is not None:
+                combo["values"] = recent
+            if self.recent_session_var.get() not in recent:
+                self.recent_session_var.set(recent[0] if recent else "")
+
+    def _persist_home_folder(self, folder):
+        settings = self._load_settings()
+        settings["home_folder"] = folder
+        self._save_settings(settings)
+        self.home_folder = folder
+        if hasattr(self, "_home_folder_label_var_obj"):
+            label = os.path.basename(folder.rstrip(os.sep)) or folder
+            self._home_folder_label_var_obj.set(f"Home: {label}")
+
+    def _home_folder_label_textvar(self):
+        if not hasattr(self, "_home_folder_label_var_obj"):
+            label = "Home: not set"
+            if self.home_folder:
+                name = os.path.basename(self.home_folder.rstrip(os.sep)) or self.home_folder
+                label = f"Home: {name}"
+            self._home_folder_label_var_obj = tk.StringVar(value=label)
+        return self._home_folder_label_var_obj
+
+    def set_home_folder(self):
+        folder = self.folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showinfo("Set Home Folder", "Choose or load a valid folder first.")
+            return
+        self._persist_home_folder(folder)
+        self.status_var.set(f"Home folder set to {folder}")
+
     def _last_session_path(self):
         return os.path.join(self._session_dir(), "last_flow_session.json")
+
+    def _autosave_dir(self):
+        autosave_dir = os.path.join(self._app_home(), "autosave")
+        os.makedirs(autosave_dir, exist_ok=True)
+        return autosave_dir
+
+    def _autosave_path(self):
+        return os.path.join(self._autosave_dir(), "latest_autosave.json")
+
+    def _state_snapshot(self):
+        return json.loads(json.dumps(self._session_payload()))
+
+    def _restore_state_snapshot(self, snapshot):
+        self.suspend_history = True
+        try:
+            self._apply_session_payload(json.loads(json.dumps(snapshot)))
+        finally:
+            self.suspend_history = False
+
+    def _push_undo_state(self):
+        if self.suspend_history:
+            return
+        self.undo_stack.append(self._state_snapshot())
+        if len(self.undo_stack) > self.history_limit:
+            self.undo_stack = self.undo_stack[-self.history_limit:]
+        self.redo_stack.clear()
+
+    def _mark_state_changed(self, message="State updated"):
+        if self.suspend_history:
+            return
+        self._schedule_autosave()
+        self._refresh_recent_sessions()
+        self.gate_status_var.set(message)
+
+    def _schedule_autosave(self):
+        if self.autosave_after_id is not None:
+            try:
+                self.root.after_cancel(self.autosave_after_id)
+            except Exception:
+                pass
+        self.autosave_after_id = self.root.after(1500, self._write_autosave)
+        self.autosave_var.set("Autosave: pending")
+
+    def _write_autosave(self):
+        self.autosave_after_id = None
+        try:
+            payload = self._session_payload()
+            path = self._autosave_path()
+            with open(path, "w") as fh:
+                json.dump(payload, fh, indent=2)
+            self.autosave_var.set(f"Autosave: {datetime.now().strftime('%H:%M:%S')}")
+        except Exception as exc:
+            self.autosave_var.set(f"Autosave failed: {type(exc).__name__}")
+
+    def undo_last_change(self):
+        if not self.undo_stack:
+            self.gate_status_var.set("Nothing to undo.")
+            return
+        current = self._state_snapshot()
+        snapshot = self.undo_stack.pop()
+        self.redo_stack.append(current)
+        self._restore_state_snapshot(snapshot)
+        self._refresh_recent_sessions()
+        self.gate_status_var.set("Undid last change.")
+
+    def redo_last_change(self):
+        if not self.redo_stack:
+            self.gate_status_var.set("Nothing to redo.")
+            return
+        current = self._state_snapshot()
+        snapshot = self.redo_stack.pop()
+        self.undo_stack.append(current)
+        self._restore_state_snapshot(snapshot)
+        self._refresh_recent_sessions()
+        self.gate_status_var.set("Redid last change.")
+
+    def load_recent_session(self):
+        filename = self.recent_session_var.get().strip()
+        if not filename:
+            self.gate_status_var.set("No recent session selected.")
+            return
+        if not os.path.isfile(filename):
+            self.gate_status_var.set(f"Recent session not found: {filename}")
+            self._refresh_recent_sessions()
+            return
+        try:
+            with open(filename) as fh:
+                payload = json.load(fh)
+            self._push_undo_state()
+            self._apply_session_payload(payload)
+            with open(self.last_session_path, "w") as fh:
+                json.dump(payload, fh, indent=2)
+            self._remember_recent_session(filename)
+            self.gate_status_var.set(f"Loaded recent session from {filename}")
+        except Exception as exc:
+            self.gate_status_var.set(f"Failed to load recent session: {type(exc).__name__}: {exc}")
+
+    def _session_payload(self):
+        return {
+            "folder": self.folder_var.get().strip(),
+            "instrument": self.instrument_var.get(),
+            "gates": self.gates,
+            "plate_metadata": self.plate_metadata,
+            "dose_curve_definitions": self.dose_curve_definitions,
+        }
+
+    def _save_session_to_path(self, filename):
+        payload = self._session_payload()
+        with open(filename, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        with open(self.last_session_path, "w") as fh:
+            json.dump(payload, fh, indent=2)
+        self._remember_recent_session(filename)
+
+    def _on_close_request(self):
+        choice = messagebox.askyesnocancel(
+            "Save Session Before Closing",
+            "Do you want to save your session before closing?",
+        )
+        if choice is None:
+            return
+        if choice:
+            filename = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json")],
+                initialdir=self._session_dir(),
+                initialfile="flow_session.json",
+            )
+            if not filename:
+                return
+            try:
+                self._save_session_to_path(filename)
+                self.gate_status_var.set(f"Saved session to {filename} and updated last-session defaults")
+            except Exception as exc:
+                self.gate_status_var.set(f"Failed to save session: {type(exc).__name__}: {exc}")
+                messagebox.showerror("Save Session Failed", f"Could not save session:\n{exc}")
+                return
+        self.root.destroy()
 
     def _autoload_last_session_or_folder(self, base_dir):
         if os.path.isfile(self.last_session_path):
@@ -866,6 +1218,10 @@ open "$TARGET_APP"
                 return
             except Exception as exc:
                 self.status_var.set(f"Could not auto-load last session: {type(exc).__name__}: {exc}")
+        if self.home_folder and os.path.isdir(self.home_folder):
+            self.folder_var.set(self.home_folder)
+            self.load_folder()
+            return
         if base_dir:
             self.load_folder()
 
@@ -892,6 +1248,8 @@ open "$TARGET_APP"
             return
 
         try:
+            if not self.suspend_history and (self.file_map or self.gates or self.plate_metadata or self.dose_curve_definitions):
+                self._push_undo_state()
             self.file_map = {}
             self.sample_cache = {}
             self.gates = []
@@ -1019,6 +1377,9 @@ open "$TARGET_APP"
         return None
 
     def _population_lineage(self, name):
+        if self._is_boolean_population(name):
+            parent_name, gate_names = self._boolean_population_spec(name)
+            return [self._population_gate(gate_name) for gate_name in gate_names if self._population_gate(gate_name) is not None]
         lineage = []
         current = self._population_gate(name)
         while current is not None:
@@ -1029,6 +1390,23 @@ open "$TARGET_APP"
     def _population_raw_dataframe(self, population_name):
         df = self._selected_raw_dataframe()
         if df.empty:
+            return df
+        if self._is_boolean_population(population_name):
+            parent_name, gate_names = self._boolean_population_spec(population_name)
+            df = self._population_raw_dataframe(parent_name)
+            for gate_name in gate_names:
+                gate = self._population_gate(gate_name)
+                if gate is None:
+                    continue
+                transformed = _apply_transform(
+                    df,
+                    gate["x_channel"],
+                    _gate_plot_y_channel(gate),
+                    gate["transform"],
+                    gate["cofactor"],
+                )
+                mask = _gate_mask(transformed, gate)
+                df = df.loc[mask].copy()
             return df
         for gate in self._population_lineage(population_name):
             transformed = _apply_transform(
@@ -1045,6 +1423,23 @@ open "$TARGET_APP"
     def _sample_population_raw_dataframe(self, label, population_name):
         df = self._sample_raw_dataframe(label)
         if df.empty:
+            return df
+        if self._is_boolean_population(population_name):
+            parent_name, gate_names = self._boolean_population_spec(population_name)
+            df = self._sample_population_raw_dataframe(label, parent_name)
+            for gate_name in gate_names:
+                gate = self._population_gate(gate_name)
+                if gate is None:
+                    continue
+                transformed = _apply_transform(
+                    df,
+                    gate["x_channel"],
+                    _gate_plot_y_channel(gate),
+                    gate["transform"],
+                    gate["cofactor"],
+                )
+                mask = _gate_mask(transformed, gate)
+                df = df.loc[mask].copy()
             return df
         for gate in self._population_lineage(population_name):
             transformed = _apply_transform(
@@ -1151,6 +1546,37 @@ open "$TARGET_APP"
         self.gate_summary_text.delete("1.0", tk.END)
         self.gate_summary_text.insert("1.0", "\n".join(lines))
         self.gate_summary_text.configure(state="disabled")
+        self._update_gate_statistics_panel(gate_name)
+
+    def _update_gate_statistics_panel(self, gate_name):
+        lines = []
+        if gate_name:
+            gate = next((g for g in self.gates if g["name"] == gate_name), None)
+            if gate is not None:
+                frac, count, total = self._gate_fraction(gate)
+                gated_df = self._population_raw_dataframe(gate_name)
+                full_df = self._selected_raw_dataframe()
+                lines.append(f"Population: {self._population_display_label(gate_name)}")
+                lines.append(f"Count: {count} / {total} parent ({100 * frac:.1f}%)")
+                lines.append(f"% of all selected events: {100 * count / max(len(full_df), 1):.1f}%")
+                fluorescence_channels = [
+                    channel for channel in self.channel_names
+                    if not any(token in channel for token in ("FSC", "SSC", "Time")) and channel in gated_df.columns
+                ]
+                for channel in fluorescence_channels[:6]:
+                    values = pd.to_numeric(gated_df[channel], errors="coerce").dropna()
+                    if values.empty:
+                        continue
+                    lines.append(
+                        f"{channel}: mean {values.mean():.1f}, median {values.median():.1f}, "
+                        f"p90 {values.quantile(0.9):.1f}"
+                    )
+        if not lines:
+            lines = ["Select a saved gate to view statistics."]
+        self.gate_stats_text.configure(state="normal")
+        self.gate_stats_text.delete("1.0", tk.END)
+        self.gate_stats_text.insert("1.0", "\n".join(lines))
+        self.gate_stats_text.configure(state="disabled")
 
     def _gate_label(self, gate):
         frac, count, total = self._gate_fraction(gate)
@@ -1191,10 +1617,12 @@ open "$TARGET_APP"
         self.heatmap_combo["values"] = metric_cols
         if self.heatmap_metric_var.get() not in metric_cols:
             self.heatmap_metric_var.set(metric_cols[0] if metric_cols else "")
-        population_labels = ["All Events"] + [self._population_display_label(gate["name"]) for gate in self.gates]
+        boolean_defs = self._boolean_population_defs()
+        population_names = [gate["name"] for gate in self.gates] + [item["name"] for item in boolean_defs]
+        population_labels = ["All Events"] + [self._population_display_label(name) for name in population_names]
         self.heatmap_population_labels = {"All Events": "__all__"}
-        for gate in self.gates:
-            self.heatmap_population_labels[self._population_display_label(gate["name"])] = gate["name"]
+        for name in population_names:
+            self.heatmap_population_labels[self._population_display_label(name)] = name
         self.heatmap_population_combo["values"] = population_labels
         if self.heatmap_population_var.get() not in population_labels:
             self.heatmap_population_var.set("All Events")
@@ -1246,7 +1674,7 @@ open "$TARGET_APP"
                     fmt=".1f",
                     cbar_kws={"label": "% positive"},
                 )
-                self.heatmap_ax.set_title(metric.replace("pct_", "") + " well heatmap")
+                self.heatmap_ax.set_title(self._effective_heatmap_title(metric.replace("pct_", "") + " well heatmap"))
             elif mode == "mfi":
                 population = self._selected_heatmap_population_name()
                 channel = self.heatmap_channel_var.get()
@@ -1269,7 +1697,7 @@ open "$TARGET_APP"
                     cbar_kws={"label": f"MFI {channel}"},
                 )
                 pop_label = "all events" if population == "__all__" else self._population_display_label(population)
-                self.heatmap_ax.set_title(f"MFI {channel} in {pop_label}")
+                self.heatmap_ax.set_title(self._effective_heatmap_title(f"MFI {channel} in {pop_label}"))
             else:
                 population = self._selected_heatmap_population_name()
                 x_channel = self.heatmap_channel_var.get()
@@ -1299,7 +1727,7 @@ open "$TARGET_APP"
                     cbar_kws={"label": "Pearson r"},
                 )
                 pop_label = "all events" if population == "__all__" else self._population_display_label(population)
-                self.heatmap_ax.set_title(f"Correlation: {x_channel} vs {y_channel} in {pop_label}")
+                self.heatmap_ax.set_title(self._effective_heatmap_title(f"Correlation: {x_channel} vs {y_channel} in {pop_label}"))
             self.heatmap_ax.set_xlabel("Column")
             self.heatmap_ax.set_ylabel("Row")
             self.heatmap_ax.set_xticklabels([str(i) for i in range(1, 13)], rotation=0)
@@ -1552,6 +1980,7 @@ open "$TARGET_APP"
             "gate_name": gate["name"],
             "press_x": float(event.xdata),
             "press_y": float(event.ydata),
+            "state_before_drag": self._state_snapshot(),
             "original": json.loads(json.dumps(gate)),
             "originals": [json.loads(json.dumps(g)) for g in self.gates if g.get("gate_group") == gate.get("gate_group")] if gate.get("gate_group") else [json.loads(json.dumps(gate))],
             **hit,
@@ -1600,10 +2029,24 @@ open "$TARGET_APP"
     def _on_drag_release(self, _event):
         if self.drag_state is not None:
             gate_name = self.drag_state["gate_name"]
+            changed = any(
+                current != original
+                for current, original in zip(
+                    [g for g in self.gates if g.get("gate_group") == next((x.get("gate_group") for x in self.gates if x["name"] == gate_name), None)] or [next((g for g in self.gates if g["name"] == gate_name), {})],
+                    self.drag_state.get("originals", [self.drag_state.get("original", {})]),
+                )
+            )
+            if changed:
+                self.undo_stack.append(self.drag_state["state_before_drag"])
+                if len(self.undo_stack) > self.history_limit:
+                    self.undo_stack = self.undo_stack[-self.history_limit:]
             self.drag_state = None
             self.mode_var.set("MODE: idle")
             self.canvas.get_tk_widget().configure(cursor="")
             self._update_gate_summary_panel()
+            if changed:
+                self.redo_stack.clear()
+                self._schedule_autosave()
             self.gate_status_var.set(f"Moved gate '{gate_name}'.")
             self._refresh_heatmap_options()
             self.update_heatmap()
@@ -1640,6 +2083,7 @@ open "$TARGET_APP"
             self.gate_status_var.set(f"Gate name '{duplicate}' already exists.")
             return
 
+        self._push_undo_state()
         self.gates.extend(specs_to_add)
         self.pending_gate = None
         selected_name = specs_to_add[0]["name"]
@@ -1653,7 +2097,7 @@ open "$TARGET_APP"
         for gate in specs_to_add:
             frac, count, total = self._gate_fraction(gate)
             summaries.append(f"{gate['name']}: {100*frac:.1f}% ({count}/{total})")
-        self.gate_status_var.set("Saved " + "; ".join(summaries))
+        self._mark_state_changed("Saved " + "; ".join(summaries))
 
     def _selected_saved_gate_name(self):
         sel = self.saved_gate_listbox.curselection()
@@ -1696,6 +2140,7 @@ open "$TARGET_APP"
         if children:
             self.gate_status_var.set(f"Delete child gates first: {', '.join(children)}")
             return
+        self._push_undo_state()
         self.gates = [g for g in self.gates if g["name"] != gate_name]
         if self._selected_population_name() == gate_name:
             self.population_var.set("All Events")
@@ -1704,7 +2149,7 @@ open "$TARGET_APP"
         self._update_gate_summary_panel()
         self._refresh_heatmap_options()
         self.update_heatmap()
-        self.gate_status_var.set(f"Deleted gate '{gate_name}'.")
+        self._mark_state_changed(f"Deleted gate '{gate_name}'.")
 
     def _refresh_gate_lists(self, selected_name=None):
         labels = []
@@ -1719,11 +2164,13 @@ open "$TARGET_APP"
             self.saved_gate_labels[label] = gate["name"]
             self.saved_gate_listbox.insert(tk.END, label)
             self.population_labels[self._population_display_label(gate["name"])] = gate["name"]
+        for boolean_def in self._boolean_population_defs():
+            self.population_labels[self._population_display_label(boolean_def["name"])] = boolean_def["name"]
         if selected_name and selected_name in names:
             idx = names.index(selected_name)
             self.saved_gate_listbox.selection_set(idx)
 
-        population_values = ["All Events"] + [self._population_display_label(name) for name in names]
+        population_values = ["All Events"] + list(self.population_labels.keys())[1:]
         self.population_combo["values"] = population_values
         if self.population_var.get() not in population_values:
             self.population_var.set("All Events")
@@ -1737,17 +2184,8 @@ open "$TARGET_APP"
         )
         if not filename:
             return
-        payload = {
-            "folder": self.folder_var.get().strip(),
-            "instrument": self.instrument_var.get(),
-            "gates": self.gates,
-            "plate_metadata": self.plate_metadata,
-            "dose_curve_definitions": self.dose_curve_definitions,
-        }
-        with open(filename, "w") as fh:
-            json.dump(payload, fh, indent=2)
-        with open(self.last_session_path, "w") as fh:
-            json.dump(payload, fh, indent=2)
+        self._save_session_to_path(filename)
+        self._remember_recent_session(filename)
         self.gate_status_var.set(f"Saved session to {filename} and updated last-session defaults")
 
     def load_session(self):
@@ -1760,12 +2198,79 @@ open "$TARGET_APP"
         try:
             with open(filename) as fh:
                 payload = json.load(fh)
+            self._push_undo_state()
             self._apply_session_payload(payload)
             with open(self.last_session_path, "w") as fh:
                 json.dump(payload, fh, indent=2)
+            self._remember_recent_session(filename)
             self.gate_status_var.set(f"Loaded session from {filename}")
         except Exception as exc:
             self.gate_status_var.set(f"Failed to load session: {type(exc).__name__}: {exc}")
+
+    def rename_selected_gate(self):
+        gate_name = self._selected_saved_gate_name()
+        if not gate_name:
+            self.gate_status_var.set("Select a saved gate to rename.")
+            return
+        gate = next((g for g in self.gates if g["name"] == gate_name), None)
+        if gate is None:
+            self.gate_status_var.set("Selected gate not found.")
+            return
+        group = [g for g in self.gates if g.get("gate_group") == gate.get("gate_group")] if gate.get("gate_group") else [gate]
+        suffix_regions = {g.get("region") for g in group if g["gate_type"] in {"vertical", "horizontal"}}
+        if len(group) == 2 and suffix_regions == {"above", "below"}:
+            current_base = gate_name.rsplit("_", 1)[0] if gate_name.endswith(("_above", "_below")) else gate_name
+            new_base = simpledialog.askstring("Rename Gate Group", "New base gate name:", initialvalue=current_base, parent=self.root)
+            if not new_base:
+                return
+            new_names = {g["name"]: f"{new_base}_{g['region']}" for g in group}
+        else:
+            new_name = simpledialog.askstring("Rename Gate", "New gate name:", initialvalue=gate_name, parent=self.root)
+            if not new_name:
+                return
+            new_names = {gate_name: new_name}
+
+        existing = {g["name"] for g in self.gates if g["name"] not in new_names}
+        duplicates = [name for name in new_names.values() if name in existing]
+        if duplicates:
+            self.gate_status_var.set(f"Gate name already exists: {duplicates[0]}")
+            return
+
+        self._push_undo_state()
+        for g in self.gates:
+            old = g["name"]
+            if old in new_names:
+                g["name"] = new_names[old]
+            if g["parent_population"] in new_names:
+                g["parent_population"] = new_names[g["parent_population"]]
+        selected_name = next(iter(new_names.values()))
+        self._refresh_gate_lists(selected_name=selected_name)
+        self.redraw()
+        self._update_gate_summary_panel()
+        self._refresh_heatmap_options()
+        self.update_heatmap()
+        self._mark_state_changed(f"Renamed gate to {selected_name}.")
+
+    def recolor_selected_gate(self):
+        gate_name = self._selected_saved_gate_name()
+        if not gate_name:
+            self.gate_status_var.set("Select a saved gate to recolor.")
+            return
+        gate = next((g for g in self.gates if g["name"] == gate_name), None)
+        if gate is None:
+            self.gate_status_var.set("Selected gate not found.")
+            return
+        chosen = colorchooser.askcolor(color=gate.get("color", "#1f77b4"), parent=self.root, title="Choose gate color")
+        if not chosen or not chosen[1]:
+            return
+        group = [g for g in self.gates if g.get("gate_group") == gate.get("gate_group")] if gate.get("gate_group") else [gate]
+        self._push_undo_state()
+        for g in group:
+            g["color"] = chosen[1]
+        self.redraw()
+        self._refresh_gate_lists(selected_name=gate_name)
+        self._update_gate_summary_panel()
+        self._mark_state_changed(f"Updated gate color for {gate_name}.")
 
     def copy_gate_names(self):
         names = "\n".join(gate["name"] for gate in self.gates)
@@ -1921,11 +2426,13 @@ open "$TARGET_APP"
             if not selected_wells:
                 info_var.set("No wells selected.")
                 return
+            self._push_undo_state()
             for well in sorted_selected_wells():
                 self.plate_metadata.setdefault(well, {})
                 self.plate_metadata[well]["sample_name"] = sample_name_var.get().strip()
             refresh_plate()
             info_var.set(f"Applied metadata to {len(selected_wells)} wells.")
+            self._mark_state_changed(f"Updated sample names for {len(selected_wells)} wells.")
 
         def apply_dose_curve():
             wells = sorted_selected_wells()
@@ -1948,6 +2455,7 @@ open "$TARGET_APP"
                 info_var.set("Dilution must be > 0.")
                 return
 
+            self._push_undo_state()
             grouped = {}
             for well in wells:
                 row = well[0]
@@ -1984,6 +2492,7 @@ open "$TARGET_APP"
             refresh_plate()
             refresh_curve_panel()
             info_var.set(f"Assigned sample '{sample_name}' to {len(wells)} wells with {direction} dose progression.")
+            self._mark_state_changed(f"Updated dose curve metadata for {sample_name}.")
 
         def export_metadata():
             if not self.plate_metadata:
@@ -2204,12 +2713,14 @@ open "$TARGET_APP"
             if not selected_wells:
                 info_var.set("No wells selected.")
                 return
+            self._push_undo_state()
             for well in selected_wells:
                 self.plate_metadata.setdefault(well, {})
                 self.plate_metadata[well]["excluded"] = bool(excluded_value)
             refresh_plate()
             self.update_heatmap()
             info_var.set(f"{'Excluded' if excluded_value else 'Included'} {len(selected_wells)} wells for downstream analysis.")
+            self._mark_state_changed(f"{'Excluded' if excluded_value else 'Included'} {len(selected_wells)} wells.")
 
         margin_x = 70
         margin_y = 55
@@ -2355,6 +2866,13 @@ open "$TARGET_APP"
         corr_channel_y_var = tk.StringVar(value=channel_cols[1] if len(channel_cols) > 1 else (channel_cols[0] if channel_cols else ""))
         gate_filter_var = tk.StringVar(value="")
         hue_dist_var = tk.StringVar(value="sample_name" if "sample_name" in intensity.columns else "well")
+        plot_title_var = tk.StringVar(value="")
+        x_title_var = tk.StringVar(value="")
+        y_title_var = tk.StringVar(value="")
+        x_min_var = tk.StringVar(value="")
+        x_max_var = tk.StringVar(value="")
+        y_min_var = tk.StringVar(value="")
+        y_max_var = tk.StringVar(value="")
         sample_names = sorted({
             str(value).strip()
             for value in pd.concat(
@@ -2397,6 +2915,20 @@ open "$TARGET_APP"
         ttk.Combobox(controls, textvariable=hue_dist_var, values=[c for c in ["sample_name", "well", "dose_curve"] if c in intensity.columns], state="readonly", width=16).grid(row=1, column=6, padx=4)
         ttk.Label(controls, text="Corr Y").grid(row=0, column=7, sticky="w")
         ttk.Combobox(controls, textvariable=corr_channel_y_var, values=channel_cols, state="readonly", width=22).grid(row=1, column=7, padx=4)
+        ttk.Label(controls, text="Plot Title").grid(row=2, column=0, sticky="w", pady=(10, 0))
+        ttk.Entry(controls, textvariable=plot_title_var, width=20).grid(row=3, column=0, padx=4, sticky="ew")
+        ttk.Label(controls, text="X Title").grid(row=2, column=1, sticky="w", pady=(10, 0))
+        ttk.Entry(controls, textvariable=x_title_var, width=20).grid(row=3, column=1, padx=4, sticky="ew")
+        ttk.Label(controls, text="Y Title").grid(row=2, column=2, sticky="w", pady=(10, 0))
+        ttk.Entry(controls, textvariable=y_title_var, width=20).grid(row=3, column=2, padx=4, sticky="ew")
+        ttk.Label(controls, text="X Min").grid(row=2, column=3, sticky="w", pady=(10, 0))
+        ttk.Entry(controls, textvariable=x_min_var, width=10).grid(row=3, column=3, padx=4, sticky="ew")
+        ttk.Label(controls, text="X Max").grid(row=2, column=4, sticky="w", pady=(10, 0))
+        ttk.Entry(controls, textvariable=x_max_var, width=10).grid(row=3, column=4, padx=4, sticky="ew")
+        ttk.Label(controls, text="Y Min").grid(row=2, column=5, sticky="w", pady=(10, 0))
+        ttk.Entry(controls, textvariable=y_min_var, width=10).grid(row=3, column=5, padx=4, sticky="ew")
+        ttk.Label(controls, text="Y Max").grid(row=2, column=6, sticky="w", pady=(10, 0))
+        ttk.Entry(controls, textvariable=y_max_var, width=10).grid(row=3, column=6, padx=4, sticky="ew")
 
         fig = Figure(figsize=(10, 6), dpi=100)
         ax = fig.add_subplot(111)
@@ -2542,6 +3074,37 @@ open "$TARGET_APP"
         ttk.Button(palette_frame, text="Reset Grouping", command=_clear_grouping).grid(row=len(group_order) + 4, column=0, sticky="ew", pady=(8, 0))
         if not sample_names:
             ttk.Label(palette_frame, text="No sample names available yet.").grid(row=len(group_order) + 5, column=0, sticky="w", pady=(8, 0))
+
+        def _parse_limit(value):
+            value = str(value).strip()
+            if not value:
+                return None
+            return float(value)
+
+        def _apply_plot_formatting(default_title=None, default_xlabel=None, default_ylabel=None):
+            title = plot_title_var.get().strip() or default_title
+            xlabel = x_title_var.get().strip() or default_xlabel
+            ylabel = y_title_var.get().strip() or default_ylabel
+            if title:
+                ax.set_title(title)
+            if xlabel:
+                ax.set_xlabel(xlabel)
+            if ylabel:
+                ax.set_ylabel(ylabel)
+            try:
+                xmin = _parse_limit(x_min_var.get())
+                xmax = _parse_limit(x_max_var.get())
+                if xmin is not None or xmax is not None:
+                    current_min, current_max = ax.get_xlim()
+                    ax.set_xlim(xmin if xmin is not None else current_min, xmax if xmax is not None else current_max)
+                ymin = _parse_limit(y_min_var.get())
+                ymax = _parse_limit(y_max_var.get())
+                if ymin is not None or ymax is not None:
+                    current_min, current_max = ax.get_ylim()
+                    ax.set_ylim(ymin if ymin is not None else current_min, ymax if ymax is not None else current_max)
+            except ValueError:
+                pass
+
         def redraw_preview(*_args):
             ax.clear()
             mode = plot_mode_var.get()
@@ -2582,7 +3145,11 @@ open "$TARGET_APP"
                         hue=huecol,
                         ax=ax,
                     )
-                ax.set_ylabel("% positive")
+                _apply_plot_formatting(
+                    default_title=pct_col_var.get().replace("pct_", "") if pct_col_var.get() else "Percent Positive",
+                    default_xlabel=xcol,
+                    default_ylabel="% positive",
+                )
                 ax.tick_params(axis="x", rotation=45)
                 fig.tight_layout()
                 canvas.draw_idle()
@@ -2648,7 +3215,11 @@ open "$TARGET_APP"
                 ax.set_ylim(-1.05, 1.05)
                 ax.axhline(0, color="#666666", linewidth=1, linestyle="--")
                 ax.tick_params(axis="x", rotation=45)
-                ax.set_title(f"Correlation: {channel_var.get()} vs {corr_channel_y_var.get()}")
+                _apply_plot_formatting(
+                    default_title=f"Correlation: {channel_var.get()} vs {corr_channel_y_var.get()}",
+                    default_xlabel=xcol,
+                    default_ylabel="correlation",
+                )
                 fig.tight_layout()
                 canvas.draw_idle()
                 return
@@ -2662,11 +3233,15 @@ open "$TARGET_APP"
                 ax=ax,
             )
             ax.set_xscale("log")
-            ax.set_title("Fluorescence distribution")
+            _apply_plot_formatting(
+                default_title="Fluorescence distribution",
+                default_xlabel=channel_var.get(),
+                default_ylabel="density",
+            )
             fig.tight_layout()
             canvas.draw_idle()
 
-        for var in [plot_mode_var, pct_col_var, x_axis_var, hue_var, channel_var, corr_channel_y_var, gate_filter_var, hue_dist_var]:
+        for var in [plot_mode_var, pct_col_var, x_axis_var, hue_var, channel_var, corr_channel_y_var, gate_filter_var, hue_dist_var, plot_title_var, x_title_var, y_title_var, x_min_var, x_max_var, y_min_var, y_max_var]:
             var.trace_add("write", redraw_preview)
         _refresh_group_boxes()
         redraw_preview()

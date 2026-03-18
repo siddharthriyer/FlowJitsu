@@ -15,3 +15,5 @@ dist/
 .eggs/
 sessions/
 exports/
+autosave/
+settings.json
