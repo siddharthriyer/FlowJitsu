@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "Usage: $0 /path/to/FlowGateApp.app [/Applications|~/Applications]"
+  echo "Usage: $0 /path/to/FlowJitsu.app [/Applications|~/Applications]"
   exit 1
 fi
 
 APP_SOURCE="$1"
 APP_TARGET_DIR="${2:-/Applications}"
-APP_NAME="FlowGateApp.app"
+APP_NAME="FlowJitsu.app"
 
 if [[ ! -d "${APP_SOURCE}" ]]; then
   echo "App bundle not found: ${APP_SOURCE}"
@@ -38,5 +38,4 @@ echo "Updated app bundle:"
 echo "  ${APP_TARGET_PATH}"
 echo
 echo "User data remains in:"
-echo "  ~/Library/Application Support/FlowGateApp"
-
+echo "  ~/Library/Application Support/FlowJitsu"

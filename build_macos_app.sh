@@ -21,7 +21,7 @@ pyinstaller \
   --noconfirm \
   --clean \
   --windowed \
-  --name FlowGateApp \
+  --name FlowJitsu \
   --paths "${SCRIPT_DIR}/src" \
   --hidden-import tkinter \
   --collect-submodules FlowCytometryTools \
@@ -30,5 +30,4 @@ pyinstaller \
 
 echo
 echo "Built macOS app bundle:"
-echo "  ${SCRIPT_DIR}/dist/FlowGateApp.app"
-
+echo "  ${SCRIPT_DIR}/dist/FlowJitsu.app"

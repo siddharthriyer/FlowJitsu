@@ -7,7 +7,7 @@ from flow_gate_app.flow_desktop_ui import launch_desktop_app
 
 def _startup_log_path():
     if getattr(sys, "frozen", False):
-        base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "FlowGateApp")
+        base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "FlowJitsu")
     else:
         base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     os.makedirs(base, exist_ok=True)

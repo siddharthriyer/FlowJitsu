@@ -1,5 +1,3 @@
-import base64
-import io
 import json
 import os
 import re
@@ -7,266 +5,72 @@ import shlex
 import shutil
 import subprocess
 import sys
-from html import escape
+import threading
 import urllib.request
 import webbrowser
 import zipfile
 import traceback
-from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
-import seaborn as sns
-from FlowCytometryTools import FCMeasurement, PolyGate, QuadGate, ThresholdGate
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
-from matplotlib.path import Path
 from matplotlib.widgets import PolygonSelector
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
 from ._app_version import __version__
+from .analysis_views import (
+    analysis_bundle_paths as _analysis_bundle_paths_impl,
+    analysis_html_document as _analysis_html_document_impl,
+    analysis_notebook_dict as _analysis_notebook_dict_impl,
+    build_html_report_sections as _build_html_report_sections_impl,
+    create_and_open_analysis_notebook as _create_and_open_analysis_notebook_impl,
+    export_html_report as _export_html_report_impl,
+    figure_to_base64 as _figure_to_base64_impl,
+    html_error_section as _html_error_section_impl,
+    html_img_tag as _html_img_tag_impl,
+    open_analysis_preview as _open_analysis_preview_impl,
+    write_analysis_bundle_csvs as _write_analysis_bundle_csvs_impl,
+)
+from .helpers import (
+    APP_BRAND,
+    DOWNLOADS_SUBDIR,
+    GITHUB_LATEST_RELEASE_API,
+    GITHUB_RELEASES_URL,
+    PendingGate,
+    apply_transform as _apply_transform,
+    build_flow_gate as _build_flow_gate,
+    event_adds_to_selection as _event_adds_to_selection,
+    flow_tools as _flow_tools,
+    gate_mask as _gate_mask,
+    gate_plot_y_channel as _gate_plot_y_channel,
+    get_channel_names as _get_channel_names,
+    get_well_name as _get_well_name,
+    is_count_axis as _is_count_axis,
+    list_fcs_files as _list_fcs_files,
+    normalize_version_tag as _normalize_version_tag,
+    open_path as _open_path,
+    platform_key as _platform_key,
+    preferred_data_dir as _preferred_data_dir,
+    render_gate as _render_gate,
+    transform_array as _transform_array,
+    version_key as _version_key,
+)
+from .plate_views import open_exclusion_editor as _open_exclusion_editor_impl
+from .plate_views import open_plate_map_editor as _open_plate_map_editor_impl
 
 
-GITHUB_REPO = "siddharthriyer/FlowJitsu"
-GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
-GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-DOWNLOADS_SUBDIR = "FlowGateAppUpdates"
+_SNS = None
 
 
-def _platform_key():
-    if sys.platform.startswith("win"):
-        return "windows"
-    if sys.platform == "darwin":
-        return "macos"
-    return "other"
-
-
-def _open_path(path):
-    path = os.path.abspath(path)
-    if sys.platform.startswith("win"):
-        os.startfile(path)
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", path], start_new_session=True)
-    else:
-        subprocess.Popen(["xdg-open", path], start_new_session=True)
-
-
-def _normalize_instrument_name(instrument):
-    if instrument is None:
-        return "cytoflex"
-    normalized = instrument.strip().lower()
-    if normalized == "symphopny":
-        normalized = "symphony"
-    return normalized
-
-
-def _preferred_data_dir(start_path):
-    current = os.path.abspath(start_path)
-    candidates = []
-    if os.path.isdir(current):
-        candidates.extend([
-            os.path.join(current, "Data"),
-            os.path.join(current, "data"),
-            os.path.join(current, "..", "Data"),
-            os.path.join(current, "..", "data"),
-        ])
-    else:
-        parent = os.path.dirname(current)
-        candidates.extend([
-            os.path.join(parent, "Data"),
-            os.path.join(parent, "data"),
-            os.path.join(parent, "..", "Data"),
-            os.path.join(parent, "..", "data"),
-        ])
-    for path in candidates:
-        path = os.path.abspath(path)
-        if os.path.isdir(path):
-            return path
-    return current if os.path.isdir(current) else os.path.dirname(current)
-
-
-def _list_fcs_files(datadir, instrument="Cytoflex"):
-    instrument = _normalize_instrument_name(instrument)
-    fcs_files = []
-    for root, _, files in os.walk(datadir):
-        for file in files:
-            if file.lower().endswith(".fcs"):
-                relpath = os.path.relpath(os.path.join(root, file), datadir)
-                fcs_files.append(relpath)
-        if instrument != "symphony" and fcs_files:
-            break
-    return sorted(fcs_files)
-
-
-def _get_well_name(file, instrument="Cytoflex"):
-    filename = os.path.basename(file)
-    instrument = _normalize_instrument_name(instrument)
-    if instrument in {"cytoflex", "symphony"}:
-        match = re.search(r"([A-H])(0?[1-9]|1[0-2])(?=\.fcs|\b)", filename, re.IGNORECASE)
-        if match:
-            row, col = match.groups()
-            return f"{row.upper()}{int(col)}"
-    raise ValueError(f"Could not determine well name from file: {file}")
-
-
-def _get_channel_names(sample):
-    channels = sample.channels
-    if hasattr(channels, "columns"):
-        for column in ("$PnS", "$PnN"):
-            if column in channels.columns:
-                values = channels[column].dropna().astype(str)
-                values = [value.strip() for value in values if value.strip()]
-                if values:
-                    return values
-        return list(channels.index.astype(str))
-    return [str(channel) for channel in channels]
-
-
-def _transform_array(values, method, cofactor):
-    arr = np.asarray(values, dtype=float)
-    if method == "linear":
-        return arr
-    if method == "log10":
-        return np.log10(np.clip(arr, 1, None))
-    if method == "arcsinh":
-        return np.arcsinh(arr / max(float(cofactor), 1e-9))
-    raise ValueError(f"Unsupported transform: {method}")
-
-
-def _apply_transform(df, x_channel, y_channel, method, cofactor):
-    transformed = pd.DataFrame(index=df.index.copy())
-    transformed[x_channel] = _transform_array(df[x_channel].to_numpy(), method, cofactor)
-    transformed[y_channel] = _transform_array(df[y_channel].to_numpy(), method, cofactor)
-    return transformed
-
-
-def _gate_plot_y_channel(gate):
-    return gate["y_channel"] if gate.get("y_channel") else gate["x_channel"]
-
-
-def _is_count_axis(value):
-    return str(value).strip().lower() in {"count", "__count__"}
-
-
-def _event_adds_to_selection(event):
-    state = int(getattr(event, "state", 0))
-    return bool(state & 0x0001 or state & 0x0004 or state & 0x0008 or state & 0x0010)
-
-
-def _normalize_version_tag(version):
-    return str(version).strip().lstrip("vV")
-
-
-def _version_key(version):
-    parts = re.findall(r"\d+", _normalize_version_tag(version))
-    return tuple(int(part) for part in parts) if parts else (0,)
-
-
-def _gate_mask(transformed_df, gate_spec):
-    gate_type = gate_spec["gate_type"]
-    x_channel = gate_spec["x_channel"]
-    x_values = transformed_df[x_channel].to_numpy()
-
-    if gate_type == "polygon":
-        y_channel = gate_spec["y_channel"]
-        points = transformed_df[[x_channel, y_channel]].to_numpy()
-        return Path(gate_spec["vertices"]).contains_points(points)
-
-    if gate_type == "quad":
-        y_channel = gate_spec["y_channel"]
-        y_values = transformed_df[y_channel].to_numpy()
-        x0 = gate_spec["x_threshold"]
-        y0 = gate_spec["y_threshold"]
-        region = gate_spec["region"]
-        if region == "top right":
-            return (x_values >= x0) & (y_values >= y0)
-        if region == "top left":
-            return (x_values < x0) & (y_values >= y0)
-        if region == "bottom left":
-            return (x_values < x0) & (y_values < y0)
-        if region == "bottom right":
-            return (x_values >= x0) & (y_values < y0)
-        raise ValueError(f"Unsupported quad region: {region}")
-
-    if gate_type == "vertical":
-        threshold = gate_spec["x_threshold"]
-        if gate_spec["region"] == "above":
-            return x_values >= threshold
-        if gate_spec["region"] == "below":
-            return x_values < threshold
-        raise ValueError(f"Unsupported threshold region: {gate_spec['region']}")
-
-    if gate_type == "horizontal":
-        y_channel = gate_spec["y_channel"]
-        y_values = transformed_df[y_channel].to_numpy()
-        threshold = gate_spec["y_threshold"]
-        if gate_spec["region"] == "above":
-            return y_values >= threshold
-        if gate_spec["region"] == "below":
-            return y_values < threshold
-        raise ValueError(f"Unsupported threshold region: {gate_spec['region']}")
-
-    raise ValueError(f"Unsupported gate type: {gate_type}")
-
-
-def _render_gate(ax, gate_spec, selected=False):
-    color = gate_spec.get("color", "crimson")
-    linewidth = 2.5 if selected else 1.8
-    if gate_spec["gate_type"] == "polygon":
-        vertices = np.asarray(gate_spec["vertices"])
-        closed = np.vstack([vertices, vertices[0]])
-        ax.plot(closed[:, 0], closed[:, 1], color=color, linewidth=linewidth)
-        return
-    if gate_spec["gate_type"] == "quad":
-        ax.axvline(gate_spec["x_threshold"], color=color, linewidth=linewidth)
-        ax.axhline(gate_spec["y_threshold"], color=color, linewidth=linewidth)
-        return
-    if gate_spec["gate_type"] == "vertical":
-        ax.axvline(gate_spec["x_threshold"], color=color, linewidth=linewidth)
-        return
-
-    if gate_spec["gate_type"] == "horizontal":
-        ax.axhline(gate_spec["y_threshold"], color=color, linewidth=linewidth)
-
-
-def _build_flow_gate(gate_spec):
-    if gate_spec["gate_type"] == "polygon":
-        return PolyGate(
-            gate_spec["vertices"],
-            channels=(gate_spec["x_channel"], gate_spec["y_channel"]),
-            region="in",
-            name=gate_spec["name"],
-        )
-    if gate_spec["gate_type"] == "quad":
-        return QuadGate(
-            (gate_spec["x_threshold"], gate_spec["y_threshold"]),
-            channels=[gate_spec["x_channel"], gate_spec["y_channel"]],
-            region=gate_spec["region"],
-            name=gate_spec["name"],
-        )
-    if gate_spec["gate_type"] == "vertical":
-        return ThresholdGate(
-            gate_spec["x_threshold"],
-            channels=[gate_spec["x_channel"]],
-            region=gate_spec["region"],
-            name=gate_spec["name"],
-        )
-    if gate_spec["gate_type"] == "horizontal":
-        return ThresholdGate(
-            gate_spec["y_threshold"],
-            channels=[gate_spec["y_channel"]],
-            region=gate_spec["region"],
-            name=gate_spec["name"],
-        )
-    raise ValueError(f"Unsupported gate type: {gate_spec['gate_type']}")
-
-
-@dataclass
-class PendingGate:
-    gate_type: str
-    payload: dict
+def _sns():
+    global _SNS
+    if _SNS is None:
+        import seaborn as sns
+        _SNS = sns
+    return _SNS
 
 
 class FlowDesktopApp:
@@ -274,7 +78,7 @@ class FlowDesktopApp:
         self.base_dir = base_dir or os.getcwd()
         self.max_points_default = int(max_points)
         self.root = tk.Tk()
-        self.root.title(f"Flow Gate Desktop v{__version__}")
+        self.root.title(f"{APP_BRAND} v{__version__}")
         self.root.geometry("1440x840")
 
         self.home_folder = self._load_home_folder()
@@ -308,6 +112,12 @@ class FlowDesktopApp:
 
         self.file_map = {}
         self.sample_cache = {}
+        self._selected_raw_cache = {}
+        self._population_raw_cache = {}
+        self._sample_population_cache = {}
+        self._display_cache = {}
+        self._summary_cache = None
+        self._intensity_cache = None
         self.channel_names = []
         self.gates = []
         self.plate_metadata = {}
@@ -315,6 +125,10 @@ class FlowDesktopApp:
         self.saved_gate_labels = {}
         self.population_labels = {"All Events": "__all__"}
         self.heatmap_population_labels = {"All Events": "__all__"}
+        self.plate_overview_hitboxes = {}
+        self.plate_tooltip = None
+        self.plate_tooltip_label = None
+        self.plate_hovered_well = None
         self.pending_gate = None
         self.selector = None
         self.canvas_click_cid = None
@@ -332,6 +146,7 @@ class FlowDesktopApp:
         self.suspend_history = False
         self.autosave_after_id = None
         self.last_session_path = self._last_session_path()
+        self._load_request_id = 0
 
         self.figure = Figure(figsize=(8, 7), dpi=100)
         self.ax = self.figure.add_subplot(111)
@@ -340,6 +155,7 @@ class FlowDesktopApp:
 
         self._init_styles()
         self._build_ui()
+        self.root.after_idle(self._set_initial_pane_sizes)
         self._refresh_recent_sessions()
         self._bind_events()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
@@ -350,7 +166,20 @@ class FlowDesktopApp:
         self.style = ttk.Style(self.root)
         self.style.configure("Section.TLabelframe.Label", font=("TkDefaultFont", 10, "bold"))
 
+    def _set_initial_pane_sizes(self):
+        try:
+            total_height = max(self.right_pane.winfo_height(), 600)
+            self.right_pane.sashpos(0, int(total_height * 0.52))
+            self.right_pane.sashpos(1, int(total_height * 0.78))
+        except Exception:
+            pass
+
     def _panel_button(self, parent, text, command, bg, fg="#1d1d1f", **grid_kwargs):
+        if _platform_key() == "windows":
+            button = ttk.Button(parent, text=text, command=command)
+            if grid_kwargs:
+                button.grid(**grid_kwargs)
+            return button
         button = tk.Button(
             parent,
             text=text,
@@ -384,7 +213,7 @@ class FlowDesktopApp:
         left_outer.rowconfigure(0, weight=1)
         left_outer.columnconfigure(0, weight=1)
 
-        left_canvas = tk.Canvas(left_outer, width=520, highlightthickness=0)
+        left_canvas = tk.Canvas(left_outer, width=560, highlightthickness=0)
         left_scroll = ttk.Scrollbar(left_outer, orient="vertical", command=left_canvas.yview)
         left_canvas.configure(yscrollcommand=left_scroll.set)
         left_canvas.grid(row=0, column=0, sticky="nsw")
@@ -409,8 +238,32 @@ class FlowDesktopApp:
         right = ttk.Frame(self.root, padding=10)
         right.grid(row=0, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=1)
-        right.rowconfigure(3, weight=0)
+        right.rowconfigure(0, weight=1)
+        right_canvas = tk.Canvas(right, highlightthickness=0)
+        right_scroll = ttk.Scrollbar(right, orient="vertical", command=right_canvas.yview)
+        right_canvas.configure(yscrollcommand=right_scroll.set)
+        right_canvas.grid(row=0, column=0, sticky="nsew")
+        right_scroll.grid(row=0, column=1, sticky="ns")
+
+        right_inner = ttk.Frame(right_canvas)
+        right_window = right_canvas.create_window((0, 0), window=right_inner, anchor="nw")
+        right_inner.columnconfigure(0, weight=1)
+        right_inner.rowconfigure(0, weight=1)
+
+        def _sync_right_scroll(_event=None):
+            right_canvas.configure(scrollregion=right_canvas.bbox("all"))
+            right_canvas.itemconfigure(right_window, width=right_canvas.winfo_width())
+
+        right_inner.bind("<Configure>", _sync_right_scroll)
+        right_canvas.bind("<Configure>", _sync_right_scroll)
+
+        def _on_right_mousewheel(event):
+            right_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        right_canvas.bind("<MouseWheel>", _on_right_mousewheel)
+
+        self.right_pane = ttk.Panedwindow(right_inner, orient=tk.VERTICAL)
+        self.right_pane.grid(row=0, column=0, sticky="nsew")
 
         def section(parent, title):
             frame = ttk.LabelFrame(parent, text=title, padding=(10, 8), style="Section.TLabelframe")
@@ -486,21 +339,23 @@ class FlowDesktopApp:
         self.gate_stats_text.configure(state="disabled")
         gate_actions = ttk.Frame(gate_frame)
         gate_actions.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        for idx in range(4):
+        for idx in range(3):
             gate_actions.columnconfigure(idx, weight=1)
         self._secondary_button(gate_actions, "Delete Gate", self.delete_gate, row=0, column=0, sticky="ew")
         self._secondary_button(gate_actions, "Rename Gate", self.rename_selected_gate, row=0, column=1, sticky="ew", padx=(6, 0))
         self._secondary_button(gate_actions, "Set Color", self.recolor_selected_gate, row=0, column=2, sticky="ew", padx=(6, 0))
-        self._secondary_button(gate_actions, "Plate Map", self.open_plate_map_editor, row=0, column=3, sticky="ew", padx=(6, 0))
+        self._secondary_button(gate_actions, "Save Template", self.save_gate_template, row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self._secondary_button(gate_actions, "Load Template", self.load_gate_template, row=1, column=2, sticky="ew", padx=(6, 0), pady=(6, 0))
 
         analysis_frame = section(left, "Analysis And Export")
         config_grid(analysis_frame, 2)
         self._secondary_button(analysis_frame, "Analysis Preview", self.open_analysis_preview, row=0, column=0, sticky="ew")
         self._accent_button(analysis_frame, "Export HTML Report", self.export_html_report, bg="#8c6a2f", fg="#1d1d1f", row=0, column=1, sticky="ew", padx=(6, 0))
         self._secondary_button(analysis_frame, "Open Analysis Notebook", self.create_and_open_analysis_notebook, row=1, column=0, sticky="ew", pady=(6, 0))
-        self._secondary_button(analysis_frame, "Excluded Wells", self.open_exclusion_editor, row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
-        self._secondary_button(analysis_frame, "Export Summary CSV", self.export_gate_summary_csv, row=2, column=0, sticky="ew", pady=(6, 0))
-        self._secondary_button(analysis_frame, "Export Intensities CSV", self.export_intensity_csv, row=2, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        self._secondary_button(analysis_frame, "Plate Map", self.open_plate_map_editor, row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        self._secondary_button(analysis_frame, "Excluded Wells", self.open_exclusion_editor, row=2, column=0, sticky="ew", pady=(6, 0))
+        self._secondary_button(analysis_frame, "Export Summary CSV", self.export_gate_summary_csv, row=2, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        self._secondary_button(analysis_frame, "Export Intensities CSV", self.export_intensity_csv, row=3, column=0, sticky="ew", pady=(6, 0))
 
         session_frame = section(left, "Session")
         config_grid(session_frame, 2)
@@ -520,8 +375,11 @@ class FlowDesktopApp:
         ttk.Label(status_frame, textvariable=self.status_var, wraplength=470).pack(anchor="w", pady=(6, 0))
         ttk.Label(status_frame, textvariable=self.gate_status_var, wraplength=470).pack(anchor="w", pady=(6, 0))
 
-        ttk.Label(right, text="Interactive Plot").grid(row=0, column=0, sticky="w")
-        canvas_frame = ttk.Frame(right)
+        plot_panel = ttk.Frame(self.right_pane, padding=(0, 0, 0, 6))
+        plot_panel.columnconfigure(0, weight=1)
+        plot_panel.rowconfigure(1, weight=1)
+        ttk.Label(plot_panel, text="Interactive Plot").grid(row=0, column=0, sticky="w")
+        canvas_frame = ttk.Frame(plot_panel)
         canvas_frame.grid(row=1, column=0, sticky="nsew")
         canvas_frame.columnconfigure(0, weight=1)
         canvas_frame.rowconfigure(0, weight=1)
@@ -532,8 +390,11 @@ class FlowDesktopApp:
         toolbar.update()
         toolbar.grid(row=1, column=0, sticky="ew")
 
-        heatmap_controls = ttk.Frame(right)
-        heatmap_controls.grid(row=2, column=0, sticky="ew", pady=(10, 4))
+        heatmap_panel = ttk.Frame(self.right_pane, padding=(0, 0, 0, 6))
+        heatmap_panel.columnconfigure(0, weight=1)
+        heatmap_panel.rowconfigure(1, weight=1)
+        heatmap_controls = ttk.Frame(heatmap_panel)
+        heatmap_controls.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         ttk.Label(heatmap_controls, text="Well Heatmap").grid(row=0, column=0, sticky="w")
         ttk.Combobox(heatmap_controls, textvariable=self.heatmap_mode_var, values=["percent", "mfi", "correlation"], state="readonly", width=12).grid(row=0, column=1, sticky="w", padx=8)
         self.heatmap_mode_var.trace_add("write", lambda *_: (self._update_heatmap_control_visibility(), self.update_heatmap()))
@@ -561,11 +422,36 @@ class FlowDesktopApp:
         self.heatmap_title_var.trace_add("write", lambda *_: self.update_heatmap())
         self._update_heatmap_control_visibility()
 
-        heatmap_frame = ttk.Frame(right)
-        heatmap_frame.grid(row=3, column=0, sticky="ew")
+        heatmap_frame = ttk.Frame(heatmap_panel)
+        heatmap_frame.grid(row=1, column=0, sticky="nsew")
         heatmap_frame.columnconfigure(0, weight=1)
+        heatmap_frame.rowconfigure(0, weight=1)
         self.heatmap_canvas = FigureCanvasTkAgg(self.heatmap_figure, master=heatmap_frame)
-        self.heatmap_canvas.get_tk_widget().grid(row=0, column=0, sticky="ew")
+        self.heatmap_canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
+        plate_panel = ttk.Frame(self.right_pane, padding=(0, 0, 0, 0))
+        plate_panel.columnconfigure(0, weight=1)
+        plate_panel.rowconfigure(1, weight=1)
+        ttk.Label(plate_panel, text="Plate Layout").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        plate_frame = ttk.Frame(plate_panel)
+        plate_frame.grid(row=1, column=0, sticky="nsew")
+        plate_frame.columnconfigure(0, weight=1)
+        plate_frame.rowconfigure(0, weight=1)
+        self.plate_overview_canvas = tk.Canvas(
+            plate_frame,
+            width=860,
+            height=270,
+            bg="#11151e",
+            highlightthickness=0,
+        )
+        self.plate_overview_canvas.grid(row=0, column=0, sticky="nsew")
+        self.plate_overview_canvas.bind("<Motion>", self._on_plate_overview_motion)
+        self.plate_overview_canvas.bind("<Leave>", self._on_plate_overview_leave)
+        self.plate_overview_canvas.bind("<Configure>", lambda _e: self.update_plate_overview())
+        self.right_pane.add(plot_panel, weight=6)
+        self.right_pane.add(heatmap_panel, weight=3)
+        self.right_pane.add(plate_panel, weight=2)
+        self.update_plate_overview()
 
     def _bind_events(self):
         self.gate_type_var.trace_add("write", lambda *_: self._update_gate_mode_visibility())
@@ -607,6 +493,208 @@ class FlowDesktopApp:
 
     def _selected_heatmap_population_name(self):
         return self.heatmap_population_labels.get(self.heatmap_population_var.get(), self.heatmap_population_var.get())
+
+    def _plate_badge_text(self, sample_name):
+        text = str(sample_name or "").strip()
+        if not text:
+            return ""
+        parts = [part for part in re.split(r"[\s_\-]+", text) if part]
+        if len(parts) >= 2:
+            token = "".join(part[0] for part in parts[:3]).upper()
+            if len(token) >= 2:
+                return token[:4]
+        compact = re.sub(r"[^A-Za-z0-9]", "", text)
+        if compact:
+            return compact[:4].upper()
+        return text[:4].upper()
+
+    def _plate_badge_color(self, sample_name):
+        text = str(sample_name or "").strip()
+        if not text:
+            return "#2a3140"
+        palette = [
+            "#4f7cff",
+            "#2f8c74",
+            "#a56ad8",
+            "#c77d2b",
+            "#cc5f7a",
+            "#3d97b8",
+            "#7a9c34",
+            "#b85c2e",
+        ]
+        return palette[abs(hash(text)) % len(palette)]
+
+    def _plate_overview_tooltip_text(self, well, has_fcs, metadata):
+        lines = [well]
+        sample_name = str(metadata.get("sample_name", "")).strip()
+        if sample_name:
+            lines.append(f"Sample: {sample_name}")
+        if metadata.get("dose_curve"):
+            lines.append(f"Dose curve: {metadata.get('dose_curve')}")
+        if metadata.get("dose") not in (None, ""):
+            lines.append(f"Dose: {metadata.get('dose')}")
+        if metadata.get("replicate") not in (None, ""):
+            lines.append(f"Replicate: {metadata.get('replicate')}")
+        if metadata.get("dose_direction"):
+            lines.append(f"Direction: {metadata.get('dose_direction')}")
+        lines.append(f"FCS file: {'yes' if has_fcs else 'no'}")
+        if metadata.get("excluded", False):
+            lines.append("Excluded from downstream analysis")
+        return "\n".join(lines)
+
+    def _show_plate_tooltip(self, x_root, y_root, text):
+        if self.plate_tooltip is None or not self.plate_tooltip.winfo_exists():
+            tooltip = tk.Toplevel(self.root)
+            tooltip.withdraw()
+            tooltip.overrideredirect(True)
+            tooltip.attributes("-topmost", True)
+            label = tk.Label(
+                tooltip,
+                text=text,
+                justify="left",
+                bg="#1c2230",
+                fg="#f3f6fb",
+                relief="solid",
+                borderwidth=1,
+                padx=8,
+                pady=6,
+            )
+            label.pack()
+            self.plate_tooltip = tooltip
+            self.plate_tooltip_label = label
+        else:
+            self.plate_tooltip_label.configure(text=text)
+        self.plate_tooltip.geometry(f"+{x_root + 14}+{y_root + 14}")
+        self.plate_tooltip.deiconify()
+
+    def _hide_plate_tooltip(self):
+        if self.plate_tooltip is not None and self.plate_tooltip.winfo_exists():
+            self.plate_tooltip.withdraw()
+        self.plate_hovered_well = None
+
+    def _on_plate_overview_motion(self, event):
+        canvas = getattr(self, "plate_overview_canvas", None)
+        if canvas is None:
+            return
+        hit = None
+        for well, payload in self.plate_overview_hitboxes.items():
+            x0, y0, x1, y1 = payload["bbox"]
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                hit = (well, payload)
+                break
+        if hit is None:
+            self._hide_plate_tooltip()
+            return
+        well, payload = hit
+        text = self._plate_overview_tooltip_text(well, payload["has_fcs"], payload["metadata"])
+        if self.plate_hovered_well != well:
+            self.plate_hovered_well = well
+            self._show_plate_tooltip(event.x_root, event.y_root, text)
+        else:
+            self._show_plate_tooltip(event.x_root, event.y_root, text)
+
+    def _on_plate_overview_leave(self, _event):
+        self._hide_plate_tooltip()
+
+    def update_plate_overview(self):
+        canvas = getattr(self, "plate_overview_canvas", None)
+        if canvas is None:
+            return
+
+        canvas.delete("all")
+        self.plate_overview_hitboxes = {}
+        self._hide_plate_tooltip()
+        width = max(canvas.winfo_width(), int(canvas.cget("width")))
+        height = max(canvas.winfo_height(), int(canvas.cget("height")))
+        margin_x = 34
+        margin_y = 28
+        step_x = max((width - margin_x - 24) / 12.0, 32)
+        step_y = max((height - margin_y - 44) / 8.0, 22)
+        radius = max(min(step_x, step_y) * 0.28, 8)
+        row_names = "ABCDEFGH"
+        available_wells = {_get_well_name(relpath, self.instrument_var.get()) for relpath in self.file_map.values()}
+
+        canvas.create_text(
+            12,
+            10,
+            anchor="nw",
+            text="Live sample layout",
+            fill="#d9dee8",
+            font=("TkDefaultFont", 10, "bold"),
+        )
+        canvas.create_text(
+            width - 12,
+            10,
+            anchor="ne",
+            text="filled = assigned sample, outline = FCS present, X = excluded",
+            fill="#9aa4b2",
+            font=("TkDefaultFont", 9),
+        )
+
+        for col in range(12):
+            x = margin_x + (col + 0.5) * step_x
+            canvas.create_text(x, margin_y, text=str(col + 1), fill="#c4ccd8", font=("TkDefaultFont", 9, "bold"))
+        for row_idx, row_name in enumerate(row_names):
+            y = margin_y + 22 + (row_idx + 0.5) * step_y
+            canvas.create_text(18, y, text=row_name, fill="#c4ccd8", font=("TkDefaultFont", 9, "bold"))
+            for col_idx in range(12):
+                well = f"{row_name}{col_idx + 1}"
+                x = margin_x + (col_idx + 0.5) * step_x
+                metadata = self.plate_metadata.get(well, {})
+                sample_name = metadata.get("sample_name", "")
+                excluded = bool(metadata.get("excluded", False))
+                has_fcs = well in available_wells
+                fill = "#1a1f2b"
+                outline = "#515d73"
+                text_fill = "#dbe4f1"
+                if has_fcs:
+                    outline = "#d5dde9"
+                    fill = "#242c39"
+                if sample_name:
+                    fill = self._plate_badge_color(sample_name)
+                    outline = "#eff4fb"
+                    text_fill = "#f7fbff"
+                if excluded:
+                    fill = "#5a6679" if has_fcs else "#394354"
+                    outline = "#ffb1b1"
+                    text_fill = "#fff5f5"
+
+                canvas.create_oval(
+                    x - radius,
+                    y - radius,
+                    x + radius,
+                    y + radius,
+                    fill=fill,
+                    outline=outline,
+                    width=2 if has_fcs else 1,
+                )
+                badge = self._plate_badge_text(sample_name)
+                if badge:
+                    canvas.create_text(x, y, text=badge, fill=text_fill, font=("TkDefaultFont", max(int(radius * 0.65), 7), "bold"))
+                elif has_fcs:
+                    canvas.create_text(x, y, text=well, fill="#dbe4f1", font=("TkDefaultFont", max(int(radius * 0.55), 6)))
+                else:
+                    canvas.create_text(x, y, text=".", fill="#617087", font=("TkDefaultFont", max(int(radius * 0.6), 7)))
+                if excluded:
+                    canvas.create_line(x - 6, y - 6, x + 6, y + 6, fill="#ffd5d5", width=2)
+                    canvas.create_line(x - 6, y + 6, x + 6, y - 6, fill="#ffd5d5", width=2)
+                self.plate_overview_hitboxes[well] = {
+                    "bbox": (x - radius - 4, y - radius - 4, x + radius + 4, y + radius + 4),
+                    "metadata": dict(metadata),
+                    "has_fcs": has_fcs,
+                }
+
+        assigned = sum(1 for meta in self.plate_metadata.values() if meta.get("sample_name"))
+        excluded = sum(1 for meta in self.plate_metadata.values() if meta.get("excluded"))
+        available = len(available_wells)
+        canvas.create_text(
+            12,
+            height - 10,
+            anchor="sw",
+            text=f"FCS wells: {available}    assigned: {assigned}    excluded: {excluded}",
+            fill="#9aa4b2",
+            font=("TkDefaultFont", 9),
+        )
 
     def _boolean_population_name(self, parent_name, gate_names):
         return f"__bool__::{parent_name}::{'&&'.join(gate_names)}"
@@ -730,11 +818,11 @@ class FlowDesktopApp:
         if getattr(sys, "frozen", False):
             if _platform_key() == "windows":
                 base_root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~")
-                base = os.path.join(base_root, "FlowGateApp")
+                base = os.path.join(base_root, APP_BRAND)
             elif _platform_key() == "macos":
-                base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "FlowGateApp")
+                base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", APP_BRAND)
             else:
-                base = os.path.join(os.path.expanduser("~"), ".flowgateapp")
+                base = os.path.join(os.path.expanduser("~"), ".flowjitsu")
             os.makedirs(base, exist_ok=True)
             return base
         return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -749,7 +837,7 @@ class FlowDesktopApp:
             GITHUB_LATEST_RELEASE_API,
             headers={
                 "Accept": "application/vnd.github+json",
-                "User-Agent": "FlowGateApp",
+                "User-Agent": APP_BRAND,
             },
         )
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -770,9 +858,9 @@ class FlowDesktopApp:
         if getattr(sys, "frozen", False):
             suffixes = ()
             if _platform_key() == "macos":
-                suffixes = ("FlowGateApp-macos.zip", ".app.zip")
+                suffixes = ("FlowJitsu-macos.zip", ".app.zip")
             elif _platform_key() == "windows":
-                suffixes = ("FlowGateApp-windows.zip",)
+                suffixes = ("FlowJitsu-windows.zip",)
             for suffix in suffixes:
                 for name, asset in names.items():
                     if name.endswith(suffix):
@@ -794,7 +882,7 @@ class FlowDesktopApp:
         destination = os.path.join(self._download_dir(), asset_name)
         request = urllib.request.Request(
             asset_url,
-            headers={"User-Agent": "FlowGateApp"},
+            headers={"User-Agent": APP_BRAND},
         )
         with urllib.request.urlopen(request, timeout=60) as response, open(destination, "wb") as fh:
             fh.write(response.read())
@@ -835,9 +923,9 @@ class FlowDesktopApp:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_root)
         for root, _dirs, files in os.walk(extract_root):
-            if "FlowGateApp.exe" in files:
-                return root, os.path.join(root, "FlowGateApp.exe")
-        raise FileNotFoundError("No FlowGateApp.exe found in the downloaded zip.")
+            if "FlowJitsu.exe" in files:
+                return root, os.path.join(root, "FlowJitsu.exe")
+        raise FileNotFoundError("No FlowJitsu.exe found in the downloaded zip.")
 
     def _write_update_helper_script(self, source_app, target_app):
         helper_path = os.path.join(self._app_home(), "install_downloaded_update.sh")
@@ -919,8 +1007,8 @@ open "$TARGET_APP"
                     f"Folder:\n{extracted_dir}\n\n"
                     f"For now, Windows updates are install-by-replacement:\n"
                     f"1. Close the running app\n"
-                    f"2. Replace your current FlowGateApp folder with the extracted one\n"
-                    f"3. Launch FlowGateApp.exe\n",
+                    f"2. Replace your current FlowJitsu folder with the extracted one\n"
+                    f"3. Launch FlowJitsu.exe\n",
                 )
                 _open_path(extracted_dir)
                 self.status_var.set(f"Downloaded Windows update to {extracted_dir}")
@@ -1087,6 +1175,7 @@ open "$TARGET_APP"
             self._apply_session_payload(json.loads(json.dumps(snapshot)))
         finally:
             self.suspend_history = False
+        self._invalidate_computation_cache()
 
     def _push_undo_state(self):
         if self.suspend_history:
@@ -1099,9 +1188,22 @@ open "$TARGET_APP"
     def _mark_state_changed(self, message="State updated"):
         if self.suspend_history:
             return
+        self._invalidate_computation_cache()
+        self.update_plate_overview()
         self._schedule_autosave()
         self._refresh_recent_sessions()
         self.gate_status_var.set(message)
+
+    def _invalidate_computation_cache(self):
+        self._selected_raw_cache.clear()
+        self._population_raw_cache.clear()
+        self._sample_population_cache.clear()
+        self._display_cache.clear()
+        self._summary_cache = None
+        self._intensity_cache = None
+
+    def _selected_labels_key(self):
+        return tuple(self._selected_labels())
 
     def _schedule_autosave(self):
         if self.autosave_after_id is not None:
@@ -1175,6 +1277,22 @@ open "$TARGET_APP"
             "dose_curve_definitions": self.dose_curve_definitions,
         }
 
+    def _gate_template_payload(self):
+        gate_channels = sorted({
+            channel
+            for gate in self.gates
+            for channel in [gate.get("x_channel"), gate.get("y_channel")]
+            if channel
+        })
+        return {
+            "template_type": "flow_gate_template",
+            "version": 1,
+            "instrument": self.instrument_var.get(),
+            "channels": gate_channels,
+            "gates": self.gates,
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
     def _save_session_to_path(self, filename):
         payload = self._session_payload()
         with open(filename, "w") as fh:
@@ -1182,6 +1300,74 @@ open "$TARGET_APP"
         with open(self.last_session_path, "w") as fh:
             json.dump(payload, fh, indent=2)
         self._remember_recent_session(filename)
+
+    def save_gate_template(self):
+        if not self.gates:
+            self.gate_status_var.set("No gates to save as a template.")
+            return
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+            initialdir=self._session_dir(),
+            initialfile="gate_template.json",
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, "w") as fh:
+                json.dump(self._gate_template_payload(), fh, indent=2)
+            self.gate_status_var.set(f"Saved gate template to {filename}")
+        except Exception as exc:
+            self.gate_status_var.set(f"Failed to save gate template: {type(exc).__name__}: {exc}")
+
+    def load_gate_template(self):
+        filename = filedialog.askopenfilename(
+            initialdir=self._session_dir(),
+            filetypes=[("JSON files", "*.json")],
+        )
+        if not filename:
+            return
+        try:
+            with open(filename) as fh:
+                payload = json.load(fh)
+            if payload.get("template_type") != "flow_gate_template":
+                raise ValueError("Selected file is not a gate template.")
+            template_gates = payload.get("gates", [])
+            if not isinstance(template_gates, list) or not template_gates:
+                raise ValueError("Gate template does not contain any gates.")
+            template_channels = sorted({
+                channel
+                for gate in template_gates
+                for channel in [gate.get("x_channel"), gate.get("y_channel")]
+                if channel
+            })
+            missing_channels = [channel for channel in template_channels if channel not in self.channel_names]
+            if self.channel_names and missing_channels:
+                raise ValueError(f"Template channels not found in current experiment: {', '.join(missing_channels)}")
+            new_names = {gate["name"] for gate in template_gates}
+            existing_names = {gate["name"] for gate in self.gates}
+            duplicates = sorted(new_names & existing_names)
+            if duplicates:
+                raise ValueError(f"Template gate names already exist: {', '.join(duplicates)}")
+            self._push_undo_state()
+            self.gates.extend(template_gates)
+            if self.gates:
+                max_group = 0
+                for gate in self.gates:
+                    group_name = gate.get("gate_group", "")
+                    match = re.search(r"(\d+)$", str(group_name))
+                    if match:
+                        max_group = max(max_group, int(match.group(1)))
+                self.gate_group_counter = max(self.gate_group_counter, max_group)
+            selected_name = template_gates[0]["name"]
+            self._refresh_gate_lists(selected_name=selected_name)
+            self.redraw()
+            self._update_gate_summary_panel()
+            self._refresh_heatmap_options()
+            self.update_heatmap()
+            self._mark_state_changed(f"Loaded gate template from {filename}")
+        except Exception as exc:
+            self.gate_status_var.set(f"Failed to load gate template: {type(exc).__name__}: {exc}")
 
     def _on_close_request(self):
         choice = messagebox.askyesnocancel(
@@ -1231,15 +1417,20 @@ open "$TARGET_APP"
         if folder:
             self.folder_var.set(folder)
         self.instrument_var.set(instrument)
-        self.load_folder()
+        self._load_request_id += 1
+        request_id = self._load_request_id
+        file_map, channel_names = self._scan_folder_contents(folder, instrument)
+        self._finish_load_folder(request_id, folder, file_map, channel_names, None)
         self.gates = payload.get("gates", [])
         self.plate_metadata = payload.get("plate_metadata", {})
         self.dose_curve_definitions = payload.get("dose_curve_definitions", {})
+        self._invalidate_computation_cache()
         self._refresh_gate_lists()
         self._update_gate_summary_panel()
         self._refresh_heatmap_options()
         self.redraw()
         self.update_heatmap()
+        self.update_plate_overview()
 
     def load_folder(self):
         folder = self.folder_var.get().strip()
@@ -1247,42 +1438,87 @@ open "$TARGET_APP"
             self.status_var.set(f"Folder not found: {folder}")
             return
 
-        try:
-            if not self.suspend_history and (self.file_map or self.gates or self.plate_metadata or self.dose_curve_definitions):
-                self._push_undo_state()
-            self.file_map = {}
-            self.sample_cache = {}
-            self.gates = []
-            self.plate_metadata = {}
-            self.dose_curve_definitions = {}
-            self.saved_gate_labels = {}
-            self.pending_gate = None
-            files = _list_fcs_files(folder, self.instrument_var.get())
-            for relpath in files:
-                well = _get_well_name(relpath, self.instrument_var.get())
-                label = f"{well} | {relpath}"
-                self.file_map[label] = relpath
+        if not self.suspend_history and (self.file_map or self.gates or self.plate_metadata or self.dose_curve_definitions):
+            self._push_undo_state()
+        self._load_request_id += 1
+        request_id = self._load_request_id
+        instrument = self.instrument_var.get()
+        self.status_var.set("Scanning folder and reading channels...")
 
-            self.well_listbox.delete(0, tk.END)
-            for label in self.file_map:
-                self.well_listbox.insert(tk.END, label)
+        def worker():
+            try:
+                file_map, channel_names = self._scan_folder_contents(folder, instrument)
+                self.root.after(0, lambda: self._finish_load_folder(request_id, folder, file_map, channel_names, None))
+            except Exception as exc:
+                self.root.after(0, lambda: self._finish_load_folder(request_id, folder, None, None, exc))
 
-            if self.file_map:
-                self.well_listbox.selection_set(0)
-                self._prime_channels()
-                self.status_var.set(f"Loaded {len(self.file_map)} wells. Click Plot Population to load events.")
-            else:
-                self.channel_names = []
-                self.x_combo["values"] = []
-                self.y_combo["values"] = []
-                self.status_var.set("No FCS files found in the selected folder.")
+        threading.Thread(target=worker, daemon=True).start()
 
-            self._refresh_gate_lists()
-            self._update_gate_summary_panel()
-            self._refresh_heatmap_options()
-            self.clear_axes()
-        except Exception as exc:
-            self.status_var.set(f"Load Folder failed: {type(exc).__name__}: {exc}")
+    def _scan_folder_contents(self, folder, instrument):
+        files = _list_fcs_files(folder, instrument)
+        file_map = {}
+        for relpath in files:
+            well = _get_well_name(relpath, instrument)
+            label = f"{well} | {relpath}"
+            file_map[label] = relpath
+        channel_names = []
+        if file_map:
+            first_label = next(iter(file_map))
+            first_relpath = file_map[first_label]
+            datafile = os.path.join(folder, first_relpath)
+            well = _get_well_name(first_relpath, instrument)
+            FCMeasurement = _flow_tools()["FCMeasurement"]
+            sample = FCMeasurement(ID=well, datafile=datafile)
+            channel_names = _get_channel_names(sample)
+        return file_map, channel_names
+
+    def _finish_load_folder(self, request_id, folder, file_map, channel_names, error):
+        if request_id != self._load_request_id:
+            return
+        if error is not None:
+            self.status_var.set(f"Load Folder failed: {type(error).__name__}: {error}")
+            return
+
+        self.file_map = file_map or {}
+        self.sample_cache = {}
+        self.gates = []
+        self.plate_metadata = {}
+        self.dose_curve_definitions = {}
+        self.saved_gate_labels = {}
+        self.pending_gate = None
+        self._invalidate_computation_cache()
+
+        self.well_listbox.delete(0, tk.END)
+        for label in self.file_map:
+            self.well_listbox.insert(tk.END, label)
+
+        if self.file_map:
+            self.well_listbox.selection_set(0)
+            self.channel_names = channel_names or []
+            self.x_combo["values"] = self.channel_names
+            self.y_combo["values"] = list(self.channel_names) + ["Count"]
+            if self.channel_names:
+                self.x_var.set("FSC-A" if "FSC-A" in self.channel_names else self.channel_names[0])
+                if _is_count_axis(self.y_var.get()):
+                    self.y_var.set("Count")
+                elif "SSC-A" in self.channel_names:
+                    self.y_var.set("SSC-A")
+                elif len(self.channel_names) > 1:
+                    self.y_var.set(self.channel_names[1])
+                else:
+                    self.y_var.set("Count")
+            self.status_var.set(f"Loaded {len(self.file_map)} wells. Click Plot Population to load events.")
+        else:
+            self.channel_names = []
+            self.x_combo["values"] = []
+            self.y_combo["values"] = []
+            self.status_var.set("No FCS files found in the selected folder.")
+
+        self._refresh_gate_lists()
+        self._update_gate_summary_panel()
+        self._refresh_heatmap_options()
+        self.clear_axes()
+        self.update_plate_overview()
 
     def _prime_channels(self):
         first_label = next(iter(self.file_map))
@@ -1304,6 +1540,7 @@ open "$TARGET_APP"
         if relpath not in self.sample_cache:
             datafile = os.path.join(self.folder_var.get().strip(), relpath)
             well = _get_well_name(relpath, self.instrument_var.get())
+            FCMeasurement = _flow_tools()["FCMeasurement"]
             self.sample_cache[relpath] = FCMeasurement(ID=well, datafile=datafile)
         return self.sample_cache[relpath]
 
@@ -1357,6 +1594,10 @@ open "$TARGET_APP"
         labels = self._selected_labels()
         if not labels:
             return pd.DataFrame()
+        cache_key = tuple(labels)
+        cached = self._selected_raw_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
         frames = []
         for idx, label in enumerate(labels):
             relpath = self.file_map[label]
@@ -1366,7 +1607,9 @@ open "$TARGET_APP"
             df["__source__"] = relpath
             df["__sample_idx__"] = idx
             frames.append(df)
-        return pd.concat(frames, ignore_index=True)
+        combined = pd.concat(frames, ignore_index=True)
+        self._selected_raw_cache[cache_key] = combined
+        return combined.copy()
 
     def _population_gate(self, name):
         if name == "__all__":
@@ -1388,6 +1631,10 @@ open "$TARGET_APP"
         return list(reversed(lineage))
 
     def _population_raw_dataframe(self, population_name):
+        cache_key = (self._selected_labels_key(), population_name)
+        cached = self._population_raw_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
         df = self._selected_raw_dataframe()
         if df.empty:
             return df
@@ -1407,7 +1654,8 @@ open "$TARGET_APP"
                 )
                 mask = _gate_mask(transformed, gate)
                 df = df.loc[mask].copy()
-            return df
+            self._population_raw_cache[cache_key] = df
+            return df.copy()
         for gate in self._population_lineage(population_name):
             transformed = _apply_transform(
                 df,
@@ -1418,9 +1666,14 @@ open "$TARGET_APP"
             )
             mask = _gate_mask(transformed, gate)
             df = df.loc[mask].copy()
-        return df
+        self._population_raw_cache[cache_key] = df
+        return df.copy()
 
     def _sample_population_raw_dataframe(self, label, population_name):
+        cache_key = (label, population_name)
+        cached = self._sample_population_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
         df = self._sample_raw_dataframe(label)
         if df.empty:
             return df
@@ -1440,7 +1693,8 @@ open "$TARGET_APP"
                 )
                 mask = _gate_mask(transformed, gate)
                 df = df.loc[mask].copy()
-            return df
+            self._sample_population_cache[cache_key] = df
+            return df.copy()
         for gate in self._population_lineage(population_name):
             transformed = _apply_transform(
                 df,
@@ -1451,7 +1705,8 @@ open "$TARGET_APP"
             )
             mask = _gate_mask(transformed, gate)
             df = df.loc[mask].copy()
-        return df
+        self._sample_population_cache[cache_key] = df
+        return df.copy()
 
     def _channel_correlation_for_label(self, label, population_name, x_channel, y_channel):
         df = self._sample_population_raw_dataframe(label, population_name)
@@ -1464,6 +1719,20 @@ open "$TARGET_APP"
         return float(corr) if pd.notna(corr) else np.nan
 
     def _display_dataframe(self):
+        cache_key = (
+            self._selected_labels_key(),
+            self._selected_population_name(),
+            self.x_var.get(),
+            self.y_var.get(),
+            self.transform_var.get(),
+            float(self.cofactor_var.get()),
+            self.y_plot_mode_var.get(),
+        )
+        cached = self._display_cache.get(cache_key)
+        if cached is not None:
+            raw_df, transformed = cached
+            return raw_df.copy(), transformed.copy()
+
         df = self._population_raw_dataframe(self._selected_population_name())
         if df.empty:
             return df, df
@@ -1484,7 +1753,8 @@ open "$TARGET_APP"
                 self.cofactor_var.get(),
             )
             transformed["__well__"] = df["__well__"].to_numpy()
-        return df, transformed
+        self._display_cache[cache_key] = (df, transformed)
+        return df.copy(), transformed.copy()
 
     def _gate_fraction(self, gate_spec):
         parent_df = self._population_raw_dataframe(gate_spec["parent_population"])
@@ -1664,7 +1934,7 @@ open "$TARGET_APP"
                     row_idx = ord(well[0]) - 65
                     col_idx = int(well[1:]) - 1
                     plate[row_idx, col_idx] = row[metric]
-                sns.heatmap(
+                _sns().heatmap(
                     plate,
                     ax=self.heatmap_ax,
                     cmap="viridis",
@@ -1688,7 +1958,7 @@ open "$TARGET_APP"
                     row_idx = ord(well[0]) - 65
                     col_idx = int(well[1:]) - 1
                     plate[row_idx, col_idx] = value
-                sns.heatmap(
+                _sns().heatmap(
                     plate,
                     ax=self.heatmap_ax,
                     cmap="magma",
@@ -1715,7 +1985,7 @@ open "$TARGET_APP"
                     row_idx = ord(well[0]) - 65
                     col_idx = int(well[1:]) - 1
                     plate[row_idx, col_idx] = value
-                sns.heatmap(
+                _sns().heatmap(
                     plate,
                     ax=self.heatmap_ax,
                     cmap="coolwarm",
@@ -2279,481 +2549,14 @@ open "$TARGET_APP"
         self.gate_status_var.set("Copied gate names to clipboard.")
 
     def open_plate_map_editor(self):
-        if not self.file_map:
-            messagebox.showinfo("Plate Map", "Load a folder first.")
-            return
-
-        top = tk.Toplevel(self.root)
-        top.title("Plate Map Editor")
-        top.geometry("980x700")
-        top.rowconfigure(0, weight=1)
-        top.columnconfigure(0, weight=1)
-
-        selected_wells = set()
-        available_wells = {_get_well_name(relpath, self.instrument_var.get()) for relpath in self.file_map.values()}
-        sample_name_var = tk.StringVar()
-        direction_var = tk.StringVar(value="horizontal")
-        curve_points_var = tk.IntVar(value=8)
-        top_dose_var = tk.DoubleVar(value=1.0)
-        dilution_var = tk.DoubleVar(value=3.0)
-        info_var = tk.StringVar(value="Click or drag across wells to select them. Hold Shift or Control to add discontinuous groups.")
-        drag_rect = {"id": None, "start": None}
-        well_items = {}
-        row_names = "ABCDEFGH"
-
-        outer = ttk.Frame(top)
-        outer.grid(row=0, column=0, sticky="nsew")
-        outer.rowconfigure(0, weight=1)
-        outer.columnconfigure(0, weight=1)
-
-        scroll_canvas = tk.Canvas(outer, highlightthickness=0)
-        scroll_canvas.grid(row=0, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(outer, orient="vertical", command=scroll_canvas.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
-        scroll_canvas.configure(yscrollcommand=scroll.set)
-
-        content = ttk.Frame(scroll_canvas, padding=10)
-        content_window = scroll_canvas.create_window((0, 0), window=content, anchor="nw")
-
-        def _sync_scroll(_event=None):
-            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
-            scroll_canvas.itemconfigure(content_window, width=scroll_canvas.winfo_width())
-
-        content.bind("<Configure>", _sync_scroll)
-        scroll_canvas.bind("<Configure>", _sync_scroll)
-
-        def _wheel(event):
-            scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        scroll_canvas.bind_all("<MouseWheel>", _wheel)
-
-        def default_well_fill(well):
-            if well in selected_wells:
-                return "#8dd3c7"
-            if well in available_wells:
-                meta = self.plate_metadata.get(well, {})
-                if meta.get("excluded", False):
-                    return "#d9d9d9"
-                sample_name = meta.get("sample_name", "")
-                if sample_name:
-                    palette = ["#cfe8ff", "#ffe0c7", "#d9f2d9", "#ecd9ff", "#ffeaa7", "#ffd6e7"]
-                    return palette[abs(hash(sample_name)) % len(palette)]
-                return "#ffffff"
-            return "#f3f3f3"
-
-        def refresh_plate():
-            for well, items in well_items.items():
-                fill = default_well_fill(well)
-                outline = "#1f77b4" if well in available_wells else "#b5b5b5"
-                width = 3 if well in selected_wells else 1.5
-                canvas.itemconfigure(items["oval"], fill=fill, outline=outline, width=width)
-
-        def set_info():
-            ordered = sorted(selected_wells, key=lambda w: (w[0], int(w[1:])))
-            info_var.set(f"Selected wells ({len(ordered)}): {', '.join(ordered) if ordered else 'none'}")
-
-        def toggle_well(well):
-            if well in selected_wells:
-                selected_wells.remove(well)
-            else:
-                selected_wells.add(well)
-            refresh_plate()
-            set_info()
-
-        def wells_in_bbox(x0, y0, x1, y1):
-            xmin, xmax = sorted((x0, x1))
-            ymin, ymax = sorted((y0, y1))
-            hits = []
-            for well, items in well_items.items():
-                cx, cy = items["center"]
-                if xmin <= cx <= xmax and ymin <= cy <= ymax:
-                    hits.append(well)
-            return hits
-
-        def on_canvas_press(event):
-            drag_rect["start"] = (event.x, event.y)
-            if drag_rect["id"] is not None:
-                canvas.delete(drag_rect["id"])
-            drag_rect["id"] = canvas.create_rectangle(event.x, event.y, event.x, event.y, dash=(4, 2), outline="#3366cc")
-
-        def on_canvas_drag(event):
-            if drag_rect["id"] is None or drag_rect["start"] is None:
-                return
-            x0, y0 = drag_rect["start"]
-            canvas.coords(drag_rect["id"], x0, y0, event.x, event.y)
-
-        def on_canvas_release(event):
-            if drag_rect["start"] is None:
-                return
-            x0, y0 = drag_rect["start"]
-            moved = abs(event.x - x0) + abs(event.y - y0) > 8
-            if drag_rect["id"] is not None:
-                canvas.delete(drag_rect["id"])
-                drag_rect["id"] = None
-            drag_rect["start"] = None
-            if moved:
-                hits = wells_in_bbox(x0, y0, event.x, event.y)
-                if not _event_adds_to_selection(event):
-                    selected_wells.clear()
-                selected_wells.update(hits)
-                refresh_plate()
-                set_info()
-
-        def on_well_click(well):
-            def handler(_event):
-                if not _event_adds_to_selection(_event):
-                    selected_wells.clear()
-                toggle_well(well)
-                meta = self.plate_metadata.get(well)
-                if meta:
-                    messagebox.showinfo(
-                        "Well Assignment",
-                        f"Well {well}\n"
-                        f"Sample: {meta.get('sample_name', '')}\n"
-                        f"Dose curve: {meta.get('dose_curve', '')}\n"
-                        f"Dose: {meta.get('dose', '')}\n"
-                        f"Replicate: {meta.get('replicate', '')}\n"
-                        f"Direction: {meta.get('dose_direction', '')}\n"
-                        f"Excluded: {bool(meta.get('excluded', False))}",
-                    )
-                return "break"
-            return handler
-
-        def sorted_selected_wells():
-            return sorted(selected_wells, key=lambda w: (w[0], int(w[1:])))
-
-        def apply_metadata():
-            if not selected_wells:
-                info_var.set("No wells selected.")
-                return
-            self._push_undo_state()
-            for well in sorted_selected_wells():
-                self.plate_metadata.setdefault(well, {})
-                self.plate_metadata[well]["sample_name"] = sample_name_var.get().strip()
-            refresh_plate()
-            info_var.set(f"Applied metadata to {len(selected_wells)} wells.")
-            self._mark_state_changed(f"Updated sample names for {len(selected_wells)} wells.")
-
-        def apply_dose_curve():
-            wells = sorted_selected_wells()
-            if not wells:
-                info_var.set("No wells selected.")
-                return
-            sample_name = sample_name_var.get().strip()
-            if not sample_name:
-                info_var.set("Enter a sample name first.")
-                return
-            curve_name = sample_name
-            direction = direction_var.get().strip().lower()
-            if direction not in {"horizontal", "vertical"}:
-                info_var.set("Direction must be horizontal or vertical.")
-                return
-            n_points = max(int(curve_points_var.get()), 1)
-            top_dose = float(top_dose_var.get())
-            dilution = float(dilution_var.get())
-            if dilution <= 0:
-                info_var.set("Dilution must be > 0.")
-                return
-
-            self._push_undo_state()
-            grouped = {}
-            for well in wells:
-                row = well[0]
-                col = int(well[1:])
-                key = row if direction == "horizontal" else col
-                grouped.setdefault(key, []).append(well)
-
-            sorted_groups = []
-            for key, group_wells in grouped.items():
-                if direction == "horizontal":
-                    group_sorted = sorted(group_wells, key=lambda w: int(w[1:]))
-                else:
-                    group_sorted = sorted(group_wells, key=lambda w: w[0])
-                sorted_groups.append((key, group_sorted))
-            sorted_groups.sort(key=lambda item: item[0])
-
-            for replicate_idx, (_key, group_wells) in enumerate(sorted_groups, start=1):
-                for point_idx, well in enumerate(group_wells[:n_points]):
-                    dose_value = top_dose / (dilution ** point_idx)
-                    self.plate_metadata.setdefault(well, {})
-                    self.plate_metadata[well]["sample_name"] = sample_name
-                    self.plate_metadata[well]["dose_curve"] = curve_name
-                    self.plate_metadata[well]["dose"] = dose_value
-                    self.plate_metadata[well]["replicate"] = replicate_idx
-                    self.plate_metadata[well]["dose_direction"] = direction
-            self.dose_curve_definitions[sample_name] = {
-                "sample_name": sample_name,
-                "direction": direction,
-                "points": n_points,
-                "top_dose": top_dose,
-                "dilution": dilution,
-                "wells": wells,
-            }
-            refresh_plate()
-            refresh_curve_panel()
-            info_var.set(f"Assigned sample '{sample_name}' to {len(wells)} wells with {direction} dose progression.")
-            self._mark_state_changed(f"Updated dose curve metadata for {sample_name}.")
-
-        def export_metadata():
-            if not self.plate_metadata:
-                messagebox.showinfo("Plate Map", "No metadata to export.")
-                return
-            filename = filedialog.asksaveasfilename(
-                defaultextension=".csv",
-                filetypes=[("CSV files", "*.csv")],
-                initialfile="plate_map_metadata.csv",
-            )
-            if not filename:
-                return
-            rows = []
-            for well, meta in sorted(self.plate_metadata.items(), key=lambda item: (item[0][0], int(item[0][1:]))):
-                row = {"well": well}
-                row.update(meta)
-                rows.append(row)
-            try:
-                pd.DataFrame(rows).to_csv(filename, index=False)
-                info_var.set(f"Saved plate metadata to {filename}")
-            except Exception as exc:
-                info_var.set(f"Failed to save plate metadata: {type(exc).__name__}: {exc}")
-
-        def refresh_curve_panel():
-            curve_text.configure(state="normal")
-            curve_text.delete("1.0", tk.END)
-            if not self.dose_curve_definitions:
-                curve_text.insert("1.0", "No dose curves assigned yet.")
-            else:
-                for key, definition in sorted(self.dose_curve_definitions.items()):
-                    wells_text = ", ".join(definition["wells"])
-                    curve_text.insert(
-                        tk.END,
-                        f"{key}\n"
-                        f"  direction: {definition['direction']}\n"
-                        f"  points: {definition['points']}\n"
-                        f"  top dose: {definition['top_dose']}\n"
-                        f"  dilution: {definition['dilution']}\n"
-                        f"  wells: {wells_text}\n\n",
-                    )
-            curve_text.configure(state="disabled")
-
-        content.columnconfigure(0, weight=1)
-        canvas = tk.Canvas(content, width=760, height=430, bg="white")
-        canvas.grid(row=0, column=0, padx=0, pady=(0, 10), sticky="ew")
-        control = ttk.Frame(content, padding=10)
-        control.grid(row=1, column=0, sticky="ew")
-        control.columnconfigure(0, weight=0)
-        control.columnconfigure(1, weight=0)
-        control.columnconfigure(2, weight=0)
-        control.columnconfigure(3, weight=0)
-        control.columnconfigure(4, weight=0)
-        control.columnconfigure(5, weight=0)
-        control.columnconfigure(6, weight=0)
-        control.columnconfigure(7, weight=0)
-        control.columnconfigure(8, weight=0)
-
-        margin_x = 70
-        margin_y = 55
-        spacing_x = 54
-        spacing_y = 42
-        radius = 16
-
-        for col in range(12):
-            canvas.create_text(margin_x + col * spacing_x, 20, text=str(col + 1), font=("Helvetica", 11, "bold"))
-        for row_idx, row_name in enumerate(row_names):
-            canvas.create_text(26, margin_y + row_idx * spacing_y, text=row_name, font=("Helvetica", 11, "bold"))
-            for col_idx in range(12):
-                well = f"{row_name}{col_idx + 1}"
-                cx = margin_x + col_idx * spacing_x
-                cy = margin_y + row_idx * spacing_y
-                oval = canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill=default_well_fill(well), outline="#888", width=1.5)
-                label = canvas.create_text(cx, cy, text=well, font=("Helvetica", 8))
-                canvas.tag_bind(oval, "<Button-1>", on_well_click(well))
-                canvas.tag_bind(label, "<Button-1>", on_well_click(well))
-                well_items[well] = {"oval": oval, "label": label, "center": (cx, cy)}
-
-        canvas.bind("<ButtonPress-1>", on_canvas_press)
-        canvas.bind("<B1-Motion>", on_canvas_drag)
-        canvas.bind("<ButtonRelease-1>", on_canvas_release)
-        refresh_plate()
-
-        basic = ttk.LabelFrame(control, text="Sample Assignment", padding=10)
-        basic.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Label(basic, text="Sample Name").grid(row=0, column=0, sticky="w")
-        ttk.Entry(basic, textvariable=sample_name_var, width=24).grid(row=1, column=0, padx=4)
-        ttk.Button(basic, text="Apply Sample Name", command=apply_metadata).grid(row=1, column=1, padx=6)
-
-        dose_frame = ttk.LabelFrame(control, text="Dose Curve Parameters", padding=10)
-        dose_frame.grid(row=1, column=0, sticky="ew")
-        ttk.Label(dose_frame, text="Direction").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(dose_frame, textvariable=direction_var, values=["horizontal", "vertical"], state="readonly", width=12).grid(row=1, column=0, padx=4)
-        ttk.Label(dose_frame, text="Number of Points").grid(row=0, column=1, sticky="w")
-        ttk.Spinbox(dose_frame, from_=1, to=24, textvariable=curve_points_var, width=10).grid(row=1, column=1, padx=4)
-        ttk.Label(dose_frame, text="Top Dose").grid(row=0, column=2, sticky="w")
-        ttk.Entry(dose_frame, textvariable=top_dose_var, width=12).grid(row=1, column=2, padx=4)
-        ttk.Label(dose_frame, text="Dilution Per Step").grid(row=0, column=3, sticky="w")
-        ttk.Entry(dose_frame, textvariable=dilution_var, width=12).grid(row=1, column=3, padx=4)
-        ttk.Button(dose_frame, text="Apply Dose Curve", command=apply_dose_curve).grid(row=1, column=4, padx=8)
-        ttk.Button(dose_frame, text="Export Plate CSV", command=export_metadata).grid(row=1, column=5, padx=8)
-
-        curve_frame = ttk.LabelFrame(content, text="Current Dose Curves", padding=10)
-        curve_frame.grid(row=2, column=0, sticky="ew")
-        curve_text = tk.Text(curve_frame, width=90, height=10, wrap="word")
-        curve_text.grid(row=0, column=0, sticky="ew")
-        curve_text.configure(state="disabled")
-        refresh_curve_panel()
-
-        ttk.Label(content, textvariable=info_var, wraplength=900).grid(row=3, column=0, sticky="w", pady=(10, 10))
+        return _open_plate_map_editor_impl(self)
 
     def open_exclusion_editor(self):
-        if not self.file_map:
-            messagebox.showinfo("Excluded Wells", "Load a folder first.")
-            return
-
-        top = tk.Toplevel(self.root)
-        top.title("Excluded Wells Editor")
-        top.geometry("920x620")
-        top.rowconfigure(0, weight=1)
-        top.columnconfigure(0, weight=1)
-
-        selected_wells = set()
-        available_wells = {_get_well_name(relpath, self.instrument_var.get()) for relpath in self.file_map.values()}
-        info_var = tk.StringVar(value="Select wells to exclude. Hold Shift or Control to add discontinuous groups.")
-        drag_rect = {"id": None, "start": None}
-        well_items = {}
-        row_names = "ABCDEFGH"
-
-        outer = ttk.Frame(top, padding=10)
-        outer.grid(row=0, column=0, sticky="nsew")
-        outer.rowconfigure(0, weight=1)
-        outer.columnconfigure(0, weight=1)
-
-        canvas = tk.Canvas(outer, width=760, height=430, bg="white")
-        canvas.grid(row=0, column=0, sticky="nsew")
-
-        def default_well_fill(well):
-            if well in selected_wells:
-                return "#ffd166"
-            if well not in available_wells:
-                return "#f3f3f3"
-            if self.plate_metadata.get(well, {}).get("excluded", False):
-                return "#7f7f7f"
-            if self.plate_metadata.get(well, {}).get("sample_name", ""):
-                return "#cfe8ff"
-            return "#ffffff"
-
-        def refresh_plate():
-            for well, items in well_items.items():
-                canvas.itemconfigure(items["oval"], fill=default_well_fill(well))
-
-        def set_info():
-            ordered = sorted(selected_wells, key=lambda w: (w[0], int(w[1:])))
-            info_var.set(f"Selected wells ({len(ordered)}): {', '.join(ordered) if ordered else 'none'}")
-
-        def wells_in_bbox(x0, y0, x1, y1):
-            xmin, xmax = sorted((x0, x1))
-            ymin, ymax = sorted((y0, y1))
-            hits = []
-            for well, items in well_items.items():
-                cx, cy = items["center"]
-                if xmin <= cx <= xmax and ymin <= cy <= ymax and well in available_wells:
-                    hits.append(well)
-            return hits
-
-        def on_canvas_press(event):
-            drag_rect["start"] = (event.x, event.y)
-            if drag_rect["id"] is not None:
-                canvas.delete(drag_rect["id"])
-            drag_rect["id"] = canvas.create_rectangle(event.x, event.y, event.x, event.y, dash=(4, 2), outline="#3366cc")
-
-        def on_canvas_drag(event):
-            if drag_rect["id"] is None or drag_rect["start"] is None:
-                return
-            x0, y0 = drag_rect["start"]
-            canvas.coords(drag_rect["id"], x0, y0, event.x, event.y)
-
-        def on_canvas_release(event):
-            if drag_rect["start"] is None:
-                return
-            x0, y0 = drag_rect["start"]
-            moved = abs(event.x - x0) + abs(event.y - y0) > 8
-            if drag_rect["id"] is not None:
-                canvas.delete(drag_rect["id"])
-                drag_rect["id"] = None
-            drag_rect["start"] = None
-            if moved:
-                hits = wells_in_bbox(x0, y0, event.x, event.y)
-                if not _event_adds_to_selection(event):
-                    selected_wells.clear()
-                selected_wells.update(hits)
-                refresh_plate()
-                set_info()
-
-        def on_well_click(well):
-            def handler(event):
-                if well not in available_wells:
-                    return "break"
-                if not _event_adds_to_selection(event):
-                    selected_wells.clear()
-                if well in selected_wells:
-                    selected_wells.remove(well)
-                else:
-                    selected_wells.add(well)
-                refresh_plate()
-                set_info()
-                meta = self.plate_metadata.get(well, {})
-                messagebox.showinfo(
-                    "Well Status",
-                    f"Well {well}\n"
-                    f"Sample: {meta.get('sample_name', '')}\n"
-                    f"Excluded: {bool(meta.get('excluded', False))}",
-                )
-                return "break"
-            return handler
-
-        def apply_excluded(excluded_value):
-            if not selected_wells:
-                info_var.set("No wells selected.")
-                return
-            self._push_undo_state()
-            for well in selected_wells:
-                self.plate_metadata.setdefault(well, {})
-                self.plate_metadata[well]["excluded"] = bool(excluded_value)
-            refresh_plate()
-            self.update_heatmap()
-            info_var.set(f"{'Excluded' if excluded_value else 'Included'} {len(selected_wells)} wells for downstream analysis.")
-            self._mark_state_changed(f"{'Excluded' if excluded_value else 'Included'} {len(selected_wells)} wells.")
-
-        margin_x = 70
-        margin_y = 55
-        spacing_x = 54
-        spacing_y = 42
-        radius = 16
-
-        for col in range(12):
-            canvas.create_text(margin_x + col * spacing_x, 20, text=str(col + 1), font=("Helvetica", 11, "bold"))
-        for row_idx, row_name in enumerate(row_names):
-            canvas.create_text(26, margin_y + row_idx * spacing_y, text=row_name, font=("Helvetica", 11, "bold"))
-            for col_idx in range(12):
-                well = f"{row_name}{col_idx + 1}"
-                cx = margin_x + col_idx * spacing_x
-                cy = margin_y + row_idx * spacing_y
-                oval = canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill=default_well_fill(well), outline="#888", width=1.5)
-                label = canvas.create_text(cx, cy, text=well, font=("Helvetica", 8))
-                canvas.tag_bind(oval, "<Button-1>", on_well_click(well))
-                canvas.tag_bind(label, "<Button-1>", on_well_click(well))
-                well_items[well] = {"oval": oval, "label": label, "center": (cx, cy)}
-
-        canvas.bind("<ButtonPress-1>", on_canvas_press)
-        canvas.bind("<B1-Motion>", on_canvas_drag)
-        canvas.bind("<ButtonRelease-1>", on_canvas_release)
-        refresh_plate()
-
-        controls = ttk.Frame(outer, padding=(0, 10, 0, 0))
-        controls.grid(row=1, column=0, sticky="ew")
-        ttk.Button(controls, text="Exclude Selected", command=lambda: apply_excluded(True)).grid(row=0, column=0, padx=(0, 8))
-        ttk.Button(controls, text="Include Selected", command=lambda: apply_excluded(False)).grid(row=0, column=1, padx=(0, 8))
-        ttk.Label(controls, textvariable=info_var, wraplength=820).grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        return _open_exclusion_editor_impl(self)
 
     def _summary_dataframe(self):
+        if self._summary_cache is not None:
+            return self._summary_cache.copy()
         fluorescent_gates = self._fluorescence_gates()
         rows = []
         for label, relpath, well in self._included_file_items():
@@ -2766,7 +2569,9 @@ open "$TARGET_APP"
                 row[f"count_{gate['name']}"] = count
                 row[f"parent_count_{gate['name']}"] = parent_total
             rows.append(row)
-        return pd.DataFrame(rows)
+        summary = pd.DataFrame(rows)
+        self._summary_cache = summary
+        return summary.copy()
 
     def export_gate_summary_csv(self):
         if not self.gates:
@@ -2786,6 +2591,8 @@ open "$TARGET_APP"
             self.gate_status_var.set(f"Failed to save gate summary: {type(exc).__name__}: {exc}")
 
     def _intensity_distribution_dataframe(self):
+        if self._intensity_cache is not None:
+            return self._intensity_cache.copy()
         fluorescence_columns = [
             channel for channel in self.channel_names
             if not any(token in channel for token in ("FSC", "SSC", "Time"))
@@ -2819,7 +2626,9 @@ open "$TARGET_APP"
                     gated_df = gated_df.loc[mask].copy()
                 out[f"in_{gate['name']}"] = df.index.isin(gated_df.index)
             frames.append(out)
-        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        intensity = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        self._intensity_cache = intensity
+        return intensity.copy()
 
     def export_intensity_csv(self):
         filename = filedialog.asksaveasfilename(
@@ -2836,415 +2645,7 @@ open "$TARGET_APP"
             self.gate_status_var.set(f"Failed to save intensity distribution: {type(exc).__name__}: {exc}")
 
     def open_analysis_preview(self):
-        summary = self._summary_dataframe()
-        intensity = self._intensity_distribution_dataframe()
-        if summary.empty and intensity.empty:
-            messagebox.showinfo("Analysis Preview", "No data available yet.")
-            return
-
-        top = tk.Toplevel(self.root)
-        top.title("Analysis Preview")
-        top.geometry("1380x820")
-        top.rowconfigure(1, weight=1)
-        top.columnconfigure(0, weight=1)
-        top.columnconfigure(1, weight=0)
-
-        controls = ttk.Frame(top, padding=10)
-        controls.grid(row=0, column=0, sticky="ew")
-
-        plot_mode_var = tk.StringVar(value="bar")
-        pct_cols = [c for c in summary.columns if c.startswith("pct_")]
-        default_pct = pct_cols[0] if pct_cols else ""
-        pct_col_var = tk.StringVar(value=default_pct)
-        x_axis_var = tk.StringVar(value="sample_name" if "sample_name" in summary.columns else "well")
-        hue_var = tk.StringVar(value="replicate" if "replicate" in summary.columns else "")
-
-        metadata_cols = {"well", "source", "sample_name", "treatment_group", "dose_curve", "dose", "replicate", "sample_type", "dose_direction", "excluded"}
-        bool_cols = [c for c in intensity.columns if c.startswith("in_")]
-        channel_cols = [c for c in intensity.columns if c not in metadata_cols and c not in bool_cols]
-        channel_var = tk.StringVar(value=channel_cols[0] if channel_cols else "")
-        corr_channel_y_var = tk.StringVar(value=channel_cols[1] if len(channel_cols) > 1 else (channel_cols[0] if channel_cols else ""))
-        gate_filter_var = tk.StringVar(value="")
-        hue_dist_var = tk.StringVar(value="sample_name" if "sample_name" in intensity.columns else "well")
-        plot_title_var = tk.StringVar(value="")
-        x_title_var = tk.StringVar(value="")
-        y_title_var = tk.StringVar(value="")
-        x_min_var = tk.StringVar(value="")
-        x_max_var = tk.StringVar(value="")
-        y_min_var = tk.StringVar(value="")
-        y_max_var = tk.StringVar(value="")
-        sample_names = sorted({
-            str(value).strip()
-            for value in pd.concat(
-                [
-                    summary["sample_name"] if "sample_name" in summary.columns else pd.Series(dtype=object),
-                    intensity["sample_name"] if "sample_name" in intensity.columns else pd.Series(dtype=object),
-                ],
-                ignore_index=True,
-            ).dropna()
-            if str(value).strip()
-        })
-        palette_options = ["deep", "muted", "bright", "pastel", "dark", "colorblind", "Set1", "Set2", "Set3", "tab10", "tab20", "husl", "hls", "Blues", "Greens", "Reds", "rocket", "mako", "flare", "crest", "viridis", "magma", "plasma", "cividis"]
-        group_order = ["Group 1", "Group 2", "Group 3", "Group 4"]
-        sample_group = {sample: "Ungrouped" for sample in sample_names}
-        sample_selected = {sample: tk.BooleanVar(value=False) for sample in sample_names}
-        group_palette_vars = {
-            "Ungrouped": tk.StringVar(value="tab10"),
-            "Group 1": tk.StringVar(value="deep"),
-            "Group 2": tk.StringVar(value="Set2"),
-            "Group 3": tk.StringVar(value="Set3"),
-            "Group 4": tk.StringVar(value="colorblind"),
-        }
-        group_boxes = {}
-        group_move_var = tk.StringVar(value="Group 1")
-        drag_status_var = tk.StringVar(value="Check one or more samples, then move them into a target group.")
-
-        ttk.Label(controls, text="Plot Type").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(controls, textvariable=plot_mode_var, values=["bar", "distribution", "correlation"], state="readonly", width=14).grid(row=1, column=0, padx=4)
-        ttk.Label(controls, text="% Positive Column").grid(row=0, column=1, sticky="w")
-        ttk.Combobox(controls, textvariable=pct_col_var, values=pct_cols, state="readonly", width=28).grid(row=1, column=1, padx=4)
-        ttk.Label(controls, text="Bar X").grid(row=0, column=2, sticky="w")
-        ttk.Combobox(controls, textvariable=x_axis_var, values=[c for c in ["sample_name", "well", "dose_curve", "dose"] if c in summary.columns], state="readonly", width=16).grid(row=1, column=2, padx=4)
-        ttk.Label(controls, text="Bar Hue").grid(row=0, column=3, sticky="w")
-        ttk.Combobox(controls, textvariable=hue_var, values=["", "replicate", "sample_name", "dose_curve"], state="readonly", width=14).grid(row=1, column=3, padx=4)
-        ttk.Label(controls, text="Intensity / Corr X").grid(row=0, column=4, sticky="w")
-        ttk.Combobox(controls, textvariable=channel_var, values=channel_cols, state="readonly", width=22).grid(row=1, column=4, padx=4)
-        ttk.Label(controls, text="Gate Filter").grid(row=0, column=5, sticky="w")
-        ttk.Combobox(controls, textvariable=gate_filter_var, values=[""] + bool_cols, state="readonly", width=22).grid(row=1, column=5, padx=4)
-        ttk.Label(controls, text="Dist Hue").grid(row=0, column=6, sticky="w")
-        ttk.Combobox(controls, textvariable=hue_dist_var, values=[c for c in ["sample_name", "well", "dose_curve"] if c in intensity.columns], state="readonly", width=16).grid(row=1, column=6, padx=4)
-        ttk.Label(controls, text="Corr Y").grid(row=0, column=7, sticky="w")
-        ttk.Combobox(controls, textvariable=corr_channel_y_var, values=channel_cols, state="readonly", width=22).grid(row=1, column=7, padx=4)
-        ttk.Label(controls, text="Plot Title").grid(row=2, column=0, sticky="w", pady=(10, 0))
-        ttk.Entry(controls, textvariable=plot_title_var, width=20).grid(row=3, column=0, padx=4, sticky="ew")
-        ttk.Label(controls, text="X Title").grid(row=2, column=1, sticky="w", pady=(10, 0))
-        ttk.Entry(controls, textvariable=x_title_var, width=20).grid(row=3, column=1, padx=4, sticky="ew")
-        ttk.Label(controls, text="Y Title").grid(row=2, column=2, sticky="w", pady=(10, 0))
-        ttk.Entry(controls, textvariable=y_title_var, width=20).grid(row=3, column=2, padx=4, sticky="ew")
-        ttk.Label(controls, text="X Min").grid(row=2, column=3, sticky="w", pady=(10, 0))
-        ttk.Entry(controls, textvariable=x_min_var, width=10).grid(row=3, column=3, padx=4, sticky="ew")
-        ttk.Label(controls, text="X Max").grid(row=2, column=4, sticky="w", pady=(10, 0))
-        ttk.Entry(controls, textvariable=x_max_var, width=10).grid(row=3, column=4, padx=4, sticky="ew")
-        ttk.Label(controls, text="Y Min").grid(row=2, column=5, sticky="w", pady=(10, 0))
-        ttk.Entry(controls, textvariable=y_min_var, width=10).grid(row=3, column=5, padx=4, sticky="ew")
-        ttk.Label(controls, text="Y Max").grid(row=2, column=6, sticky="w", pady=(10, 0))
-        ttk.Entry(controls, textvariable=y_max_var, width=10).grid(row=3, column=6, padx=4, sticky="ew")
-
-        fig = Figure(figsize=(10, 6), dpi=100)
-        ax = fig.add_subplot(111)
-        canvas_frame = ttk.Frame(top, padding=10)
-        canvas_frame.grid(row=1, column=0, sticky="nsew")
-        canvas_frame.rowconfigure(0, weight=1)
-        canvas_frame.columnconfigure(0, weight=1)
-        canvas = FigureCanvasTkAgg(fig, master=canvas_frame)
-        canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
-        toolbar = NavigationToolbar2Tk(canvas, canvas_frame, pack_toolbar=False)
-        toolbar.update()
-        toolbar.grid(row=1, column=0, sticky="ew")
-
-        palette_frame = ttk.LabelFrame(top, text="Sample Palette Groups", padding=10)
-        palette_frame.grid(row=1, column=1, sticky="ns", padx=(0, 10), pady=10)
-        palette_frame.columnconfigure(0, weight=1)
-
-        ttk.Label(
-            palette_frame,
-            text="Check samples, move them into a target group, and assign any seaborn or matplotlib palette name to that group.",
-            wraplength=300,
-        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
-        ttk.Label(palette_frame, textvariable=drag_status_var, wraplength=300).grid(row=1, column=0, sticky="w", pady=(0, 8))
-
-        move_row = ttk.Frame(palette_frame)
-        move_row.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        ttk.Label(move_row, text="Move Selected To").grid(row=0, column=0, sticky="w")
-        ttk.Combobox(move_row, textvariable=group_move_var, values=["Ungrouped"] + group_order, state="readonly", width=14).grid(row=0, column=1, padx=6)
-
-        def _group_samples(group_name):
-            return sorted([sample for sample, assigned in sample_group.items() if assigned == group_name])
-
-        def _refresh_group_boxes():
-            for group_name, widgets in group_boxes.items():
-                samples = _group_samples(group_name)
-                widgets["count_var"].set(f"{len(samples)} samples")
-                for child in widgets["sample_frame"].winfo_children():
-                    child.destroy()
-                if not samples:
-                    ttk.Label(widgets["sample_frame"], text="No samples").grid(row=0, column=0, sticky="w")
-                else:
-                    for idx, sample in enumerate(samples):
-                        ttk.Checkbutton(
-                            widgets["sample_frame"],
-                            text=sample,
-                            variable=sample_selected[sample],
-                            command=lambda s=sample, g=group_name: _update_selection_status(s, g),
-                        ).grid(row=idx, column=0, sticky="w")
-            if "redraw_preview" in locals():
-                redraw_preview()
-
-        def _selected_samples():
-            return [sample for sample, selected in sample_selected.items() if selected.get()]
-
-        def _update_selection_status(_sample=None, _group=None):
-            samples = _selected_samples()
-            if not samples:
-                drag_status_var.set("Check one or more samples, then move them into a target group.")
-            else:
-                drag_status_var.set(f"Selected {len(samples)} sample(s). Move them to {group_move_var.get()}.")
-
-        def _move_selected():
-            samples = _selected_samples()
-            if not samples:
-                drag_status_var.set("No samples checked.")
-                return
-            target_group = group_move_var.get()
-            for sample in samples:
-                sample_group[sample] = target_group
-                sample_selected[sample].set(False)
-            drag_status_var.set(f"Moved {len(samples)} sample(s) into {target_group}.")
-            _refresh_group_boxes()
-
-        def _clear_grouping():
-            for sample in sample_names:
-                sample_group[sample] = "Ungrouped"
-                sample_selected[sample].set(False)
-            _refresh_group_boxes()
-
-        def _resolve_palette(name, n_colors):
-            palette_name = str(name).strip() or "tab10"
-            try:
-                return sns.color_palette(palette_name, max(n_colors, 1)).as_hex()
-            except Exception:
-                drag_status_var.set(f"Palette '{palette_name}' not found. Falling back to tab10.")
-                return sns.color_palette("tab10", max(n_colors, 1)).as_hex()
-
-        def _palette_for_hue(hue_values):
-            if hue_values != "sample_name":
-                return None
-            palette = {}
-            for group_name, widgets in group_boxes.items():
-                samples = _group_samples(group_name)
-                if not samples:
-                    continue
-                colors = _resolve_palette(group_palette_vars[group_name].get(), len(samples))
-                for idx, sample in enumerate(samples):
-                    palette[sample] = colors[idx % len(colors)]
-            return palette or None
-
-        def _add_group_box(parent, row, group_name):
-            frame = ttk.LabelFrame(parent, text=group_name, padding=8)
-            frame.grid(row=row, column=0, sticky="ew", pady=6)
-            frame.columnconfigure(0, weight=1)
-            count_var = tk.StringVar(value="0 samples")
-            if group_name != "Ungrouped":
-                ttk.Label(frame, text="Palette").grid(row=0, column=0, sticky="w")
-                palette_combo = ttk.Combobox(
-                    frame,
-                    textvariable=group_palette_vars[group_name],
-                    values=palette_options,
-                    state="normal",
-                    width=16,
-                )
-                palette_combo.grid(row=0, column=1, sticky="e")
-                palette_combo.bind("<<ComboboxSelected>>", lambda _event: redraw_preview())
-                palette_combo.bind("<Return>", lambda _event: redraw_preview())
-                palette_combo.bind("<FocusOut>", lambda _event: redraw_preview())
-            else:
-                ttk.Label(frame, text="Default palette").grid(row=0, column=0, sticky="w")
-                palette_combo = ttk.Combobox(
-                    frame,
-                    textvariable=group_palette_vars[group_name],
-                    values=palette_options,
-                    state="normal",
-                    width=16,
-                )
-                palette_combo.grid(row=0, column=1, sticky="e")
-                palette_combo.bind("<<ComboboxSelected>>", lambda _event: redraw_preview())
-                palette_combo.bind("<Return>", lambda _event: redraw_preview())
-                palette_combo.bind("<FocusOut>", lambda _event: redraw_preview())
-            ttk.Label(frame, textvariable=count_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 4))
-            sample_frame = ttk.Frame(frame)
-            sample_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
-            ttk.Label(frame, text="Check samples below, then use Move Selected To").grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
-            group_boxes[group_name] = {"frame": frame, "sample_frame": sample_frame, "count_var": count_var}
-
-        ttk.Button(move_row, text="Move", command=_move_selected).grid(row=0, column=2, padx=6)
-
-        _add_group_box(palette_frame, 3, "Ungrouped")
-        for idx, group_name in enumerate(group_order, start=4):
-            _add_group_box(palette_frame, idx, group_name)
-        ttk.Button(palette_frame, text="Reset Grouping", command=_clear_grouping).grid(row=len(group_order) + 4, column=0, sticky="ew", pady=(8, 0))
-        if not sample_names:
-            ttk.Label(palette_frame, text="No sample names available yet.").grid(row=len(group_order) + 5, column=0, sticky="w", pady=(8, 0))
-
-        def _parse_limit(value):
-            value = str(value).strip()
-            if not value:
-                return None
-            return float(value)
-
-        def _apply_plot_formatting(default_title=None, default_xlabel=None, default_ylabel=None):
-            title = plot_title_var.get().strip() or default_title
-            xlabel = x_title_var.get().strip() or default_xlabel
-            ylabel = y_title_var.get().strip() or default_ylabel
-            if title:
-                ax.set_title(title)
-            if xlabel:
-                ax.set_xlabel(xlabel)
-            if ylabel:
-                ax.set_ylabel(ylabel)
-            try:
-                xmin = _parse_limit(x_min_var.get())
-                xmax = _parse_limit(x_max_var.get())
-                if xmin is not None or xmax is not None:
-                    current_min, current_max = ax.get_xlim()
-                    ax.set_xlim(xmin if xmin is not None else current_min, xmax if xmax is not None else current_max)
-                ymin = _parse_limit(y_min_var.get())
-                ymax = _parse_limit(y_max_var.get())
-                if ymin is not None or ymax is not None:
-                    current_min, current_max = ax.get_ylim()
-                    ax.set_ylim(ymin if ymin is not None else current_min, ymax if ymax is not None else current_max)
-            except ValueError:
-                pass
-
-        def redraw_preview(*_args):
-            ax.clear()
-            mode = plot_mode_var.get()
-            if mode == "bar":
-                if not pct_col_var.get() or pct_col_var.get() not in summary.columns:
-                    ax.set_title("No % positive column selected")
-                    canvas.draw_idle()
-                    return
-                plot_df = summary.copy()
-                xcol = x_axis_var.get() if x_axis_var.get() in plot_df.columns else "well"
-                huecol = hue_var.get() if hue_var.get() in plot_df.columns and hue_var.get() else None
-                if huecol == "sample_name":
-                    sns.barplot(
-                        data=plot_df,
-                        x=xcol,
-                        y=pct_col_var.get(),
-                        hue=huecol,
-                        palette=_palette_for_hue("sample_name"),
-                        ax=ax,
-                    )
-                elif huecol is None and xcol == "sample_name":
-                    sample_palette = _palette_for_hue("sample_name") or {}
-                    order = list(plot_df[xcol].dropna().astype(str).unique())
-                    colors = [sample_palette.get(name, "#4c72b0") for name in order]
-                    sns.barplot(
-                        data=plot_df,
-                        x=xcol,
-                        y=pct_col_var.get(),
-                        order=order,
-                        palette=colors,
-                        ax=ax,
-                    )
-                else:
-                    sns.barplot(
-                        data=plot_df,
-                        x=xcol,
-                        y=pct_col_var.get(),
-                        hue=huecol,
-                        ax=ax,
-                    )
-                _apply_plot_formatting(
-                    default_title=pct_col_var.get().replace("pct_", "") if pct_col_var.get() else "Percent Positive",
-                    default_xlabel=xcol,
-                    default_ylabel="% positive",
-                )
-                ax.tick_params(axis="x", rotation=45)
-                fig.tight_layout()
-                canvas.draw_idle()
-                return
-
-            if not channel_var.get() or channel_var.get() not in intensity.columns:
-                ax.set_title("No intensity channel selected")
-                canvas.draw_idle()
-                return
-            plot_df = intensity.copy()
-            if gate_filter_var.get() and gate_filter_var.get() in plot_df.columns:
-                plot_df = plot_df[plot_df[gate_filter_var.get()].astype(bool)]
-            huecol = hue_dist_var.get() if hue_dist_var.get() in plot_df.columns else None
-            plot_df = plot_df.copy()
-            plot_df[channel_var.get()] = pd.to_numeric(plot_df[channel_var.get()], errors="coerce")
-            plot_df = plot_df.dropna(subset=[channel_var.get()])
-            plot_df = plot_df[plot_df[channel_var.get()] > 0]
-            if plot_df.empty:
-                ax.set_title("No intensity data after filtering")
-                canvas.draw_idle()
-                return
-            if mode == "correlation":
-                if not corr_channel_y_var.get() or corr_channel_y_var.get() not in intensity.columns:
-                    ax.set_title("No correlation Y channel selected")
-                    canvas.draw_idle()
-                    return
-                if channel_var.get() == corr_channel_y_var.get():
-                    ax.set_title("Choose two different channels")
-                    canvas.draw_idle()
-                    return
-                xcol = x_axis_var.get() if x_axis_var.get() in plot_df.columns else "well"
-                huecol = hue_var.get() if hue_var.get() in plot_df.columns and hue_var.get() else None
-                group_cols = [xcol] + ([huecol] if huecol and huecol != xcol else [])
-                corr_rows = []
-                for group_key, group in plot_df.groupby(group_cols, dropna=False):
-                    corr_input = group[[channel_var.get(), corr_channel_y_var.get()]].apply(pd.to_numeric, errors="coerce").dropna()
-                    if len(corr_input) < 2:
-                        corr_value = np.nan
-                    else:
-                        corr_calc = corr_input[channel_var.get()].corr(corr_input[corr_channel_y_var.get()])
-                        corr_value = float(corr_calc) if pd.notna(corr_calc) else np.nan
-                    if not isinstance(group_key, tuple):
-                        group_key = (group_key,)
-                    row = {group_cols[idx]: group_key[idx] for idx in range(len(group_cols))}
-                    row["correlation"] = corr_value
-                    corr_rows.append(row)
-                corr_df = pd.DataFrame(corr_rows).dropna(subset=["correlation"])
-                if corr_df.empty:
-                    ax.set_title("No valid correlations after filtering")
-                    canvas.draw_idle()
-                    return
-                if huecol == "sample_name":
-                    sns.barplot(
-                        data=corr_df,
-                        x=xcol,
-                        y="correlation",
-                        hue=huecol,
-                        palette=_palette_for_hue("sample_name"),
-                        ax=ax,
-                    )
-                else:
-                    sns.barplot(data=corr_df, x=xcol, y="correlation", hue=huecol, ax=ax)
-                ax.set_ylim(-1.05, 1.05)
-                ax.axhline(0, color="#666666", linewidth=1, linestyle="--")
-                ax.tick_params(axis="x", rotation=45)
-                _apply_plot_formatting(
-                    default_title=f"Correlation: {channel_var.get()} vs {corr_channel_y_var.get()}",
-                    default_xlabel=xcol,
-                    default_ylabel="correlation",
-                )
-                fig.tight_layout()
-                canvas.draw_idle()
-                return
-            sns.kdeplot(
-                data=plot_df,
-                x=channel_var.get(),
-                hue=huecol,
-                common_norm=False,
-                fill=False,
-                palette=_palette_for_hue(huecol),
-                ax=ax,
-            )
-            ax.set_xscale("log")
-            _apply_plot_formatting(
-                default_title="Fluorescence distribution",
-                default_xlabel=channel_var.get(),
-                default_ylabel="density",
-            )
-            fig.tight_layout()
-            canvas.draw_idle()
-
-        for var in [plot_mode_var, pct_col_var, x_axis_var, hue_var, channel_var, corr_channel_y_var, gate_filter_var, hue_dist_var, plot_title_var, x_title_var, y_title_var, x_min_var, x_max_var, y_min_var, y_max_var]:
-            var.trace_add("write", redraw_preview)
-        _refresh_group_boxes()
-        redraw_preview()
+        return _open_analysis_preview_impl(self)
 
     def _default_export_dir(self):
         return os.path.join(self._app_home(), "exports")
@@ -3258,464 +2659,34 @@ open "$TARGET_APP"
         return pd.DataFrame(rows)
 
     def _analysis_bundle_paths(self):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        date_label = datetime.now().strftime("%Y-%m-%d")
-        export_root = self._default_export_dir()
-        export_dir = os.path.join(export_root, timestamp)
-        os.makedirs(export_dir, exist_ok=True)
-        return {
-            "timestamp": timestamp,
-            "date_label": date_label,
-            "export_dir": export_dir,
-            "summary_path": os.path.join(export_dir, "flow_gate_summary.csv"),
-            "intensity_path": os.path.join(export_dir, "flow_intensity_distribution.csv"),
-            "plate_path": os.path.join(export_dir, "plate_metadata.csv"),
-            "html_path": os.path.join(export_dir, f"{date_label}_flow_desktop_report.html"),
-            "notebook_path": os.path.join(self._app_home(), f"{date_label}_flow_desktop_analysis.ipynb"),
-        }
+        return _analysis_bundle_paths_impl(self)
 
     def _write_analysis_bundle_csvs(self, bundle_paths):
-        summary = self._summary_dataframe()
-        intensity = self._intensity_distribution_dataframe()
-        plate = self._plate_metadata_dataframe()
-        summary.to_csv(bundle_paths["summary_path"], index=False)
-        intensity.to_csv(bundle_paths["intensity_path"], index=False)
-        plate.to_csv(bundle_paths["plate_path"], index=False)
-        return summary, intensity, plate
+        return _write_analysis_bundle_csvs_impl(self, bundle_paths)
 
     def _figure_to_base64(self, fig):
-        buffer = io.BytesIO()
-        fig.savefig(buffer, format="png", dpi=140, bbox_inches="tight")
-        buffer.seek(0)
-        return base64.b64encode(buffer.read()).decode("ascii")
+        return _figure_to_base64_impl(fig)
 
     def _html_img_tag(self, fig, alt_text):
-        encoded = self._figure_to_base64(fig)
-        return f'<img alt="{escape(alt_text)}" src="data:image/png;base64,{encoded}" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 6px;" />'
+        return _html_img_tag_impl(fig, alt_text)
 
     def _html_error_section(self, title, exc):
-        return (
-            f"<section><h2>{escape(title)}</h2>"
-            f"<p>Skipped this section: {escape(type(exc).__name__)}: {escape(str(exc))}</p></section>"
-        )
+        return _html_error_section_impl(title, exc)
 
     def _build_html_report_sections(self, summary, intensity, plate):
-        sections = []
-
-        sections.append(
-            "<section><h2>Summary</h2>"
-            f"<p>Samples: {len(summary)} | Gates: {len([c for c in summary.columns if c.startswith('pct_')])} | "
-            f"Events rows: {len(intensity)}</p></section>"
-        )
-
-        if not summary.empty:
-            preview = summary.head(24).to_html(index=False, classes="dataframe", border=0)
-            sections.append(f"<section><h2>Gate Summary Table</h2>{preview}</section>")
-
-        if not plate.empty:
-            plate_html = plate.head(96).to_html(index=False, classes="dataframe", border=0)
-            sections.append(f"<section><h2>Plate Metadata</h2>{plate_html}</section>")
-
-        pct_cols = [c for c in summary.columns if c.startswith("pct_")]
-        if pct_cols:
-            pct_col = pct_cols[0]
-            try:
-                fig = Figure(figsize=(10, 4.8), dpi=100)
-                ax = fig.add_subplot(111)
-                xcol = "sample_name" if "sample_name" in summary.columns else "well"
-                sns.barplot(data=summary, x=xcol, y=pct_col, ax=ax)
-                ax.set_ylabel("% positive")
-                ax.tick_params(axis="x", rotation=45)
-                ax.set_title(f"{pct_col.replace('pct_', '')} % positive")
-                fig.tight_layout()
-                sections.append(f"<section><h2>Percent Positive</h2>{self._html_img_tag(fig, pct_col)}</section>")
-            except Exception as exc:
-                sections.append(self._html_error_section("Percent Positive", exc))
-
-            if "dose" in summary.columns:
-                plot_df = summary.copy()
-                plot_df["dose"] = pd.to_numeric(plot_df["dose"], errors="coerce")
-                plot_df = plot_df.dropna(subset=["dose"])
-                if not plot_df.empty:
-                    try:
-                        fig = Figure(figsize=(7, 5), dpi=100)
-                        ax = fig.add_subplot(111)
-                        huecol = "sample_name" if "sample_name" in plot_df.columns else None
-                        stylecol = "replicate" if "replicate" in plot_df.columns else None
-                        lineplot_kwargs = {
-                            "data": plot_df,
-                            "x": "dose",
-                            "y": pct_col,
-                            "markers": True,
-                            "dashes": False,
-                            "ax": ax,
-                        }
-                        if huecol:
-                            lineplot_kwargs["hue"] = huecol
-                        if stylecol:
-                            lineplot_kwargs["style"] = stylecol
-                        sns.lineplot(**lineplot_kwargs)
-                        ax.set_xscale("log")
-                        ax.set_ylabel("% positive")
-                        ax.set_title(f"Dose Curve: {pct_col.replace('pct_', '')}")
-                        fig.tight_layout()
-                        sections.append(f"<section><h2>Dose Curve</h2>{self._html_img_tag(fig, 'dose curve')}</section>")
-                    except Exception as exc:
-                        sections.append(self._html_error_section("Dose Curve", exc))
-
-            heatmap_df = summary[["well", pct_col]].dropna()
-            if not heatmap_df.empty:
-                try:
-                    plate_grid = np.full((8, 12), np.nan)
-                    for _, row in heatmap_df.iterrows():
-                        well = str(row["well"])
-                        if re.match(r"^[A-H](?:[1-9]|1[0-2])$", well):
-                            plate_grid[ord(well[0]) - 65, int(well[1:]) - 1] = row[pct_col]
-                    fig = Figure(figsize=(8, 3.8), dpi=100)
-                    ax = fig.add_subplot(111)
-                    sns.heatmap(
-                        plate_grid,
-                        ax=ax,
-                        cmap="viridis",
-                        vmin=0,
-                        vmax=100,
-                        annot=True,
-                        fmt=".1f",
-                        cbar_kws={"label": "% positive"},
-                    )
-                    ax.set_title(f"Well Heatmap: {pct_col.replace('pct_', '')}")
-                    ax.set_xlabel("Column")
-                    ax.set_ylabel("Row")
-                    ax.set_xticklabels([str(i) for i in range(1, 13)], rotation=0)
-                    ax.set_yticklabels(list("ABCDEFGH"), rotation=0)
-                    fig.tight_layout()
-                    sections.append(f"<section><h2>Well Heatmap</h2>{self._html_img_tag(fig, 'well heatmap')}</section>")
-                except Exception as exc:
-                    sections.append(self._html_error_section("Well Heatmap", exc))
-
-        metadata_cols = {"well", "source", "sample_name", "treatment_group", "dose_curve", "dose", "replicate", "sample_type", "dose_direction", "excluded"}
-        bool_cols = {c for c in intensity.columns if c.startswith("in_")}
-        channel_cols = [c for c in intensity.columns if c not in metadata_cols and c not in bool_cols]
-        if channel_cols:
-            channel = channel_cols[0]
-            plot_df = intensity.copy()
-            plot_df[channel] = pd.to_numeric(plot_df[channel], errors="coerce")
-            plot_df = plot_df.dropna(subset=[channel])
-            plot_df = plot_df[plot_df[channel] > 0]
-            if not plot_df.empty:
-                try:
-                    fig = Figure(figsize=(8, 5), dpi=100)
-                    ax = fig.add_subplot(111)
-                    hue_col = "sample_name" if "sample_name" in plot_df.columns else ("well" if "well" in plot_df.columns else None)
-                    kdeplot_kwargs = {
-                        "data": plot_df,
-                        "x": channel,
-                        "common_norm": False,
-                        "fill": False,
-                        "ax": ax,
-                    }
-                    if hue_col:
-                        kdeplot_kwargs["hue"] = hue_col
-                    sns.kdeplot(**kdeplot_kwargs)
-                    ax.set_xscale("log")
-                    ax.set_title(f"Fluorescence Distribution: {channel}")
-                    fig.tight_layout()
-                    sections.append(f"<section><h2>Fluorescence Distribution</h2>{self._html_img_tag(fig, channel)}</section>")
-                except Exception as exc:
-                    sections.append(self._html_error_section("Fluorescence Distribution", exc))
-
-        if len(channel_cols) >= 2:
-            x_channel, y_channel = channel_cols[:2]
-            try:
-                corr_rows = []
-                x_group = "sample_name" if "sample_name" in intensity.columns else "well"
-                for group_key, group in intensity.groupby(x_group, dropna=False):
-                    corr_input = group[[x_channel, y_channel]].apply(pd.to_numeric, errors="coerce").dropna()
-                    if len(corr_input) < 2:
-                        continue
-                    corr_value = corr_input[x_channel].corr(corr_input[y_channel])
-                    if pd.notna(corr_value):
-                        corr_rows.append({x_group: group_key, "correlation": float(corr_value)})
-                corr_df = pd.DataFrame(corr_rows)
-                if not corr_df.empty:
-                    fig = Figure(figsize=(10, 4.8), dpi=100)
-                    ax = fig.add_subplot(111)
-                    sns.barplot(data=corr_df, x=x_group, y="correlation", ax=ax)
-                    ax.axhline(0, color="#666666", linewidth=1, linestyle="--")
-                    ax.set_ylim(-1.05, 1.05)
-                    ax.tick_params(axis="x", rotation=45)
-                    ax.set_title(f"Correlation: {x_channel} vs {y_channel}")
-                    fig.tight_layout()
-                    sections.append(f"<section><h2>Channel Correlation</h2>{self._html_img_tag(fig, 'channel correlation')}</section>")
-            except Exception as exc:
-                sections.append(self._html_error_section("Channel Correlation", exc))
-
-        return "\n".join(sections)
+        return _build_html_report_sections_impl(self, summary, intensity, plate)
 
     def _analysis_html_document(self, summary, intensity, plate, bundle_paths):
-        body = self._build_html_report_sections(summary, intensity, plate)
-        summary_relpath = os.path.relpath(bundle_paths["summary_path"], os.path.dirname(bundle_paths["html_path"]))
-        intensity_relpath = os.path.relpath(bundle_paths["intensity_path"], os.path.dirname(bundle_paths["html_path"]))
-        plate_relpath = os.path.relpath(bundle_paths["plate_path"], os.path.dirname(bundle_paths["html_path"]))
-        title = f"{bundle_paths['date_label']} Flow Desktop Report"
-        return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{escape(title)}</title>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 24px; line-height: 1.4; color: #1d1d1f; }}
-    h1, h2 {{ margin-bottom: 0.4rem; }}
-    section {{ margin: 28px 0; }}
-    .paths code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 4px; }}
-    table.dataframe {{ border-collapse: collapse; font-size: 0.92rem; }}
-    table.dataframe th, table.dataframe td {{ border: 1px solid #ddd; padding: 6px 8px; }}
-    table.dataframe th {{ background: #f7f7f7; }}
-  </style>
-</head>
-<body>
-  <h1>{escape(title)}</h1>
-  <p>Static analysis report exported from FlowGateApp. The raw data tables for this run are saved alongside this report.</p>
-  <div class="paths">
-    <p><strong>CSV exports:</strong> <code>{escape(summary_relpath)}</code>, <code>{escape(intensity_relpath)}</code>, <code>{escape(plate_relpath)}</code></p>
-  </div>
-  {body}
-</body>
-</html>
-"""
+        return _analysis_html_document_impl(self, summary, intensity, plate, bundle_paths)
 
     def _analysis_notebook_dict(self, summary_relpath, intensity_relpath, plate_relpath, notebook_title):
-        cells = [
-            {
-                "cell_type": "markdown",
-                "metadata": {},
-                "source": [
-                    f"# {notebook_title}\n",
-                    "\n",
-                    "This notebook loads the CSVs exported from the desktop gating UI and provides example plots for downstream analysis.\n",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "import pandas as pd\n",
-                    "import numpy as np\n",
-                    "import matplotlib.pyplot as plt\n",
-                    "import seaborn as sns\n",
-                    "from pathlib import Path\n",
-                    "\n",
-                    "sns.set_context('talk')\n",
-                    "sns.set_style('whitegrid')\n",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    f"summary_path = Path('{summary_relpath}')\n",
-                    f"intensity_path = Path('{intensity_relpath}')\n",
-                    f"plate_path = Path('{plate_relpath}')\n",
-                    "\n",
-                    "summary = pd.read_csv(summary_path)\n",
-                    "intensity = pd.read_csv(intensity_path)\n",
-                    "plate = pd.read_csv(plate_path) if plate_path.exists() and plate_path.stat().st_size > 0 else pd.DataFrame()\n",
-                    "\n",
-                    "summary.head()\n",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "pct_cols = [c for c in summary.columns if c.startswith('pct_')]\n",
-                    "pct_cols\n",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "def plot_percent_positive(df, pct_col, x='sample_name', hue=None, sort_by=None, figsize=(10, 5)):\n",
-                    "    plot_df = df.copy()\n",
-                    "    if x not in plot_df.columns:\n",
-                    "        x = 'well'\n",
-                    "    if sort_by is not None and sort_by in plot_df.columns:\n",
-                    "        plot_df = plot_df.sort_values(sort_by)\n",
-                    "    plt.figure(figsize=figsize)\n",
-                    "    sns.barplot(data=plot_df, x=x, y=pct_col, hue=hue)\n",
-                    "    plt.xticks(rotation=45, ha='right')\n",
-                    "    plt.ylabel('% positive')\n",
-                    "    plt.tight_layout()\n",
-                    "\n",
-                    "def plot_dose_curve(df, pct_col, sample_name=None, figsize=(7, 5)):\n",
-                    "    plot_df = df.copy()\n",
-                    "    if sample_name is not None and 'sample_name' in plot_df.columns:\n",
-                    "        plot_df = plot_df[plot_df['sample_name'] == sample_name]\n",
-                    "    plot_df = plot_df.dropna(subset=['dose'])\n",
-                    "    plot_df['dose'] = pd.to_numeric(plot_df['dose'], errors='coerce')\n",
-                    "    plot_df = plot_df.dropna(subset=['dose'])\n",
-                    "    plt.figure(figsize=figsize)\n",
-                    "    sns.lineplot(data=plot_df, x='dose', y=pct_col, hue='sample_name', style='replicate', markers=True, dashes=False)\n",
-                    "    plt.xscale('log')\n",
-                    "    plt.ylabel('% positive')\n",
-                    "    plt.tight_layout()\n",
-                    "\n",
-                    "def plot_intensity_distribution(df, channel, sample_name=None, gate_col=None, figsize=(8, 5)):\n",
-                    "    plot_df = df.copy()\n",
-                    "    hue_col = 'sample_name' if 'sample_name' in plot_df.columns else ('well' if 'well' in plot_df.columns else None)\n",
-                    "    if sample_name is not None and 'sample_name' in plot_df.columns:\n",
-                    "        plot_df = plot_df[plot_df['sample_name'] == sample_name]\n",
-                    "    if gate_col is not None and gate_col in plot_df.columns:\n",
-                    "        plot_df = plot_df[plot_df[gate_col].astype(bool)]\n",
-                    "    plot_df[channel] = pd.to_numeric(plot_df[channel], errors='coerce')\n",
-                    "    plot_df = plot_df.dropna(subset=[channel])\n",
-                    "    plot_df = plot_df[plot_df[channel] > 0]\n",
-                    "    plt.figure(figsize=figsize)\n",
-                    "    sns.kdeplot(data=plot_df, x=channel, hue=hue_col, common_norm=False, fill=False)\n",
-                    "    plt.xscale('log')\n",
-                    "    plt.tight_layout()\n",
-                    "\n",
-                    "def plot_channel_correlation(df, x_channel, y_channel, x='sample_name', hue=None, gate_col=None, figsize=(10, 5)):\n",
-                    "    plot_df = df.copy()\n",
-                    "    if gate_col is not None and gate_col in plot_df.columns:\n",
-                    "        plot_df = plot_df[plot_df[gate_col].astype(bool)]\n",
-                    "    group_cols = [x] + ([hue] if hue and hue in plot_df.columns and hue != x else [])\n",
-                    "    rows = []\n",
-                    "    for group_key, group in plot_df.groupby(group_cols, dropna=False):\n",
-                    "        corr_input = group[[x_channel, y_channel]].apply(pd.to_numeric, errors='coerce').dropna()\n",
-                    "        if len(corr_input) < 2:\n",
-                    "            corr_value = np.nan\n",
-                    "        else:\n",
-                    "            corr_value = corr_input[x_channel].corr(corr_input[y_channel])\n",
-                    "        if not isinstance(group_key, tuple):\n",
-                    "            group_key = (group_key,)\n",
-                    "        row = {group_cols[idx]: group_key[idx] for idx in range(len(group_cols))}\n",
-                    "        row['correlation'] = corr_value\n",
-                    "        rows.append(row)\n",
-                    "    corr_df = pd.DataFrame(rows).dropna(subset=['correlation'])\n",
-                    "    plt.figure(figsize=figsize)\n",
-                    "    sns.barplot(data=corr_df, x=x, y='correlation', hue=hue)\n",
-                    "    plt.ylim(-1.05, 1.05)\n",
-                    "    plt.axhline(0, color='0.5', linestyle='--')\n",
-                    "    plt.xticks(rotation=45, ha='right')\n",
-                    "    plt.tight_layout()\n",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "# Example: plot the first available percent-positive column\n",
-                    "if pct_cols:\n",
-                    "    plot_percent_positive(summary, pct_cols[0], x='sample_name')\n",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "# Example: dose curve plot when dose metadata is assigned\n",
-                    "if pct_cols and 'dose' in summary.columns:\n",
-                    "    plot_dose_curve(summary, pct_cols[0])\n",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "# Example: fluorescence intensity distribution for the first non-metadata channel\n",
-                    "metadata_cols = {'well', 'source', 'sample_name', 'treatment_group', 'dose_curve', 'dose', 'replicate', 'sample_type', 'dose_direction', 'excluded'}\n",
-                    "bool_cols = {c for c in intensity.columns if c.startswith('in_')}\n",
-                    "channel_cols = [c for c in intensity.columns if c not in metadata_cols and c not in bool_cols]\n",
-                    "channel_cols\n",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "if channel_cols:\n",
-                    "    plot_intensity_distribution(intensity, channel_cols[0])\n",
-                ],
-            },
-            {
-                "cell_type": "code",
-                "execution_count": None,
-                "metadata": {},
-                "outputs": [],
-                "source": [
-                    "# Example: correlation between the first two fluorescence channels\n",
-                    "if len(channel_cols) >= 2:\n",
-                    "    plot_channel_correlation(intensity, channel_cols[0], channel_cols[1], x='sample_name')\n",
-                ],
-            },
-        ]
-        return {
-            "cells": cells,
-            "metadata": {
-                "kernelspec": {
-                    "display_name": "Python 3",
-                    "language": "python",
-                    "name": "python3",
-                },
-                "language_info": {"name": "python", "version": "3.10"},
-            },
-            "nbformat": 4,
-            "nbformat_minor": 5,
-        }
+        return _analysis_notebook_dict_impl(summary_relpath, intensity_relpath, plate_relpath, notebook_title)
 
     def create_and_open_analysis_notebook(self):
-        try:
-            bundle_paths = self._analysis_bundle_paths()
-            self._write_analysis_bundle_csvs(bundle_paths)
-
-            nb = self._analysis_notebook_dict(
-                summary_relpath=os.path.relpath(bundle_paths["summary_path"], os.path.dirname(bundle_paths["notebook_path"])),
-                intensity_relpath=os.path.relpath(bundle_paths["intensity_path"], os.path.dirname(bundle_paths["notebook_path"])),
-                plate_relpath=os.path.relpath(bundle_paths["plate_path"], os.path.dirname(bundle_paths["notebook_path"])),
-                notebook_title=f"{bundle_paths['date_label']} Flow Desktop Analysis",
-            )
-            with open(bundle_paths["notebook_path"], "w") as fh:
-                json.dump(nb, fh, indent=1)
-
-            self.gate_status_var.set(
-                f"Saved notebook: {bundle_paths['notebook_path']} | "
-                f"CSVs: {bundle_paths['summary_path']}, {bundle_paths['intensity_path']}, {bundle_paths['plate_path']}"
-            )
-        except Exception as exc:
-            self.gate_status_var.set(f"Failed to create analysis notebook: {type(exc).__name__}: {exc}")
+        return _create_and_open_analysis_notebook_impl(self)
 
     def export_html_report(self):
-        try:
-            bundle_paths = self._analysis_bundle_paths()
-            summary, intensity, plate = self._write_analysis_bundle_csvs(bundle_paths)
-            html_document = self._analysis_html_document(summary, intensity, plate, bundle_paths)
-            with open(bundle_paths["html_path"], "w", encoding="utf-8") as fh:
-                fh.write(html_document)
-            self.gate_status_var.set(
-                f"Saved HTML report: {bundle_paths['html_path']} | "
-                f"CSVs: {bundle_paths['summary_path']}, {bundle_paths['intensity_path']}, {bundle_paths['plate_path']}"
-            )
-        except Exception as exc:
-            self.gate_status_var.set(f"Failed to export HTML report: {type(exc).__name__}: {exc}")
+        return _export_html_report_impl(self)
 
     def get_gate_specs(self):
         return list(self.gates)

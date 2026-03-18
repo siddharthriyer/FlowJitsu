@@ -71,7 +71,7 @@ jobs:
             --noconfirm \
             --clean \
             --windowed \
-            --name FlowGateApp \
+            --name FlowJitsu \
             --paths "${{ github.workspace }}/src" \
             --hidden-import tkinter \
             --collect-submodules FlowCytometryTools \
@@ -79,13 +79,13 @@ jobs:
             "${{ github.workspace }}/src/flow_gate_app/__main__.py"
 
       - name: Zip app bundle
-        run: ditto -c -k --sequesterRsrc --keepParent "dist/FlowGateApp.app" "dist/FlowGateApp-macos.zip"
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/FlowJitsu.app" "dist/FlowJitsu-macos.zip"
 
       - name: Upload macOS app artifact
         uses: actions/upload-artifact@v4
         with:
           name: macos-app
-          path: dist/FlowGateApp-macos.zip
+          path: dist/FlowJitsu-macos.zip
 
   build-windows-app:
     runs-on: windows-latest
@@ -115,7 +115,7 @@ jobs:
             --noconfirm `
             --clean `
             --windowed `
-            --name FlowGateApp `
+            --name FlowJitsu `
             --paths "${{ github.workspace }}\\src" `
             --hidden-import tkinter `
             --collect-submodules FlowCytometryTools `
@@ -124,14 +124,14 @@ jobs:
         shell: pwsh
 
       - name: Zip Windows app
-        run: Compress-Archive -Path "dist/FlowGateApp/*" -DestinationPath "dist/FlowGateApp-windows.zip" -Force
+        run: Compress-Archive -Path "dist/FlowJitsu/*" -DestinationPath "dist/FlowJitsu-windows.zip" -Force
         shell: pwsh
 
       - name: Upload Windows app artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-app
-          path: dist/FlowGateApp-windows.zip
+          path: dist/FlowJitsu-windows.zip
 
   create-release:
     if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''

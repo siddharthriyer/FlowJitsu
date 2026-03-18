@@ -4,8 +4,8 @@ set -euo pipefail
 ENV_NAME="${1:-biocompute-vscode-min}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST_DIR="${SCRIPT_DIR}/dist"
-APP_NAME="FlowGateApp.app"
-APP_ZIP="${DIST_DIR}/FlowGateApp-macos.zip"
+APP_NAME="FlowJitsu.app"
+APP_ZIP="${DIST_DIR}/FlowJitsu-macos.zip"
 
 rm -rf "${DIST_DIR}"
 
@@ -22,4 +22,3 @@ shasum -a 256 ./* > SHA256SUMS.txt
 echo
 echo "Release assets ready in:"
 echo "  ${DIST_DIR}"
-
