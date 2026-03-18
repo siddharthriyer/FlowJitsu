@@ -2718,6 +2718,12 @@ open "$TARGET_APP"
         encoded = self._figure_to_base64(fig)
         return f'<img alt="{escape(alt_text)}" src="data:image/png;base64,{encoded}" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 6px;" />'
 
+    def _html_error_section(self, title, exc):
+        return (
+            f"<section><h2>{escape(title)}</h2>"
+            f"<p>Skipped this section: {escape(type(exc).__name__)}: {escape(str(exc))}</p></section>"
+        )
+
     def _build_html_report_sections(self, summary, intensity, plate):
         sections = []
 
@@ -2738,67 +2744,79 @@ open "$TARGET_APP"
         pct_cols = [c for c in summary.columns if c.startswith("pct_")]
         if pct_cols:
             pct_col = pct_cols[0]
-            fig = Figure(figsize=(10, 4.8), dpi=100)
-            ax = fig.add_subplot(111)
-            xcol = "sample_name" if "sample_name" in summary.columns else "well"
-            sns.barplot(data=summary, x=xcol, y=pct_col, ax=ax)
-            ax.set_ylabel("% positive")
-            ax.tick_params(axis="x", rotation=45)
-            ax.set_title(f"{pct_col.replace('pct_', '')} % positive")
-            fig.tight_layout()
-            sections.append(f"<section><h2>Percent Positive</h2>{self._html_img_tag(fig, pct_col)}</section>")
+            try:
+                fig = Figure(figsize=(10, 4.8), dpi=100)
+                ax = fig.add_subplot(111)
+                xcol = "sample_name" if "sample_name" in summary.columns else "well"
+                sns.barplot(data=summary, x=xcol, y=pct_col, ax=ax)
+                ax.set_ylabel("% positive")
+                ax.tick_params(axis="x", rotation=45)
+                ax.set_title(f"{pct_col.replace('pct_', '')} % positive")
+                fig.tight_layout()
+                sections.append(f"<section><h2>Percent Positive</h2>{self._html_img_tag(fig, pct_col)}</section>")
+            except Exception as exc:
+                sections.append(self._html_error_section("Percent Positive", exc))
 
             if "dose" in summary.columns:
                 plot_df = summary.copy()
                 plot_df["dose"] = pd.to_numeric(plot_df["dose"], errors="coerce")
                 plot_df = plot_df.dropna(subset=["dose"])
                 if not plot_df.empty:
-                    fig = Figure(figsize=(7, 5), dpi=100)
-                    ax = fig.add_subplot(111)
-                    huecol = "sample_name" if "sample_name" in plot_df.columns else None
-                    stylecol = "replicate" if "replicate" in plot_df.columns else None
-                    sns.lineplot(
-                        data=plot_df,
-                        x="dose",
-                        y=pct_col,
-                        hue=huecol,
-                        style=stylecol,
-                        markers=True,
-                        dashes=False,
-                        ax=ax,
-                    )
-                    ax.set_xscale("log")
-                    ax.set_ylabel("% positive")
-                    ax.set_title(f"Dose Curve: {pct_col.replace('pct_', '')}")
-                    fig.tight_layout()
-                    sections.append(f"<section><h2>Dose Curve</h2>{self._html_img_tag(fig, 'dose curve')}</section>")
+                    try:
+                        fig = Figure(figsize=(7, 5), dpi=100)
+                        ax = fig.add_subplot(111)
+                        huecol = "sample_name" if "sample_name" in plot_df.columns else None
+                        stylecol = "replicate" if "replicate" in plot_df.columns else None
+                        lineplot_kwargs = {
+                            "data": plot_df,
+                            "x": "dose",
+                            "y": pct_col,
+                            "markers": True,
+                            "dashes": False,
+                            "ax": ax,
+                        }
+                        if huecol:
+                            lineplot_kwargs["hue"] = huecol
+                        if stylecol:
+                            lineplot_kwargs["style"] = stylecol
+                        sns.lineplot(**lineplot_kwargs)
+                        ax.set_xscale("log")
+                        ax.set_ylabel("% positive")
+                        ax.set_title(f"Dose Curve: {pct_col.replace('pct_', '')}")
+                        fig.tight_layout()
+                        sections.append(f"<section><h2>Dose Curve</h2>{self._html_img_tag(fig, 'dose curve')}</section>")
+                    except Exception as exc:
+                        sections.append(self._html_error_section("Dose Curve", exc))
 
             heatmap_df = summary[["well", pct_col]].dropna()
             if not heatmap_df.empty:
-                plate_grid = np.full((8, 12), np.nan)
-                for _, row in heatmap_df.iterrows():
-                    well = str(row["well"])
-                    if re.match(r"^[A-H](?:[1-9]|1[0-2])$", well):
-                        plate_grid[ord(well[0]) - 65, int(well[1:]) - 1] = row[pct_col]
-                fig = Figure(figsize=(8, 3.8), dpi=100)
-                ax = fig.add_subplot(111)
-                sns.heatmap(
-                    plate_grid,
-                    ax=ax,
-                    cmap="viridis",
-                    vmin=0,
-                    vmax=100,
-                    annot=True,
-                    fmt=".1f",
-                    cbar_kws={"label": "% positive"},
-                )
-                ax.set_title(f"Well Heatmap: {pct_col.replace('pct_', '')}")
-                ax.set_xlabel("Column")
-                ax.set_ylabel("Row")
-                ax.set_xticklabels([str(i) for i in range(1, 13)], rotation=0)
-                ax.set_yticklabels(list("ABCDEFGH"), rotation=0)
-                fig.tight_layout()
-                sections.append(f"<section><h2>Well Heatmap</h2>{self._html_img_tag(fig, 'well heatmap')}</section>")
+                try:
+                    plate_grid = np.full((8, 12), np.nan)
+                    for _, row in heatmap_df.iterrows():
+                        well = str(row["well"])
+                        if re.match(r"^[A-H](?:[1-9]|1[0-2])$", well):
+                            plate_grid[ord(well[0]) - 65, int(well[1:]) - 1] = row[pct_col]
+                    fig = Figure(figsize=(8, 3.8), dpi=100)
+                    ax = fig.add_subplot(111)
+                    sns.heatmap(
+                        plate_grid,
+                        ax=ax,
+                        cmap="viridis",
+                        vmin=0,
+                        vmax=100,
+                        annot=True,
+                        fmt=".1f",
+                        cbar_kws={"label": "% positive"},
+                    )
+                    ax.set_title(f"Well Heatmap: {pct_col.replace('pct_', '')}")
+                    ax.set_xlabel("Column")
+                    ax.set_ylabel("Row")
+                    ax.set_xticklabels([str(i) for i in range(1, 13)], rotation=0)
+                    ax.set_yticklabels(list("ABCDEFGH"), rotation=0)
+                    fig.tight_layout()
+                    sections.append(f"<section><h2>Well Heatmap</h2>{self._html_img_tag(fig, 'well heatmap')}</section>")
+                except Exception as exc:
+                    sections.append(self._html_error_section("Well Heatmap", exc))
 
         metadata_cols = {"well", "source", "sample_name", "treatment_group", "dose_curve", "dose", "replicate", "sample_type", "dose_direction", "excluded"}
         bool_cols = {c for c in intensity.columns if c.startswith("in_")}
@@ -2810,37 +2828,52 @@ open "$TARGET_APP"
             plot_df = plot_df.dropna(subset=[channel])
             plot_df = plot_df[plot_df[channel] > 0]
             if not plot_df.empty:
-                fig = Figure(figsize=(8, 5), dpi=100)
-                ax = fig.add_subplot(111)
-                hue_col = "sample_name" if "sample_name" in plot_df.columns else ("well" if "well" in plot_df.columns else None)
-                sns.kdeplot(data=plot_df, x=channel, hue=hue_col, common_norm=False, fill=False, ax=ax)
-                ax.set_xscale("log")
-                ax.set_title(f"Fluorescence Distribution: {channel}")
-                fig.tight_layout()
-                sections.append(f"<section><h2>Fluorescence Distribution</h2>{self._html_img_tag(fig, channel)}</section>")
+                try:
+                    fig = Figure(figsize=(8, 5), dpi=100)
+                    ax = fig.add_subplot(111)
+                    hue_col = "sample_name" if "sample_name" in plot_df.columns else ("well" if "well" in plot_df.columns else None)
+                    kdeplot_kwargs = {
+                        "data": plot_df,
+                        "x": channel,
+                        "common_norm": False,
+                        "fill": False,
+                        "ax": ax,
+                    }
+                    if hue_col:
+                        kdeplot_kwargs["hue"] = hue_col
+                    sns.kdeplot(**kdeplot_kwargs)
+                    ax.set_xscale("log")
+                    ax.set_title(f"Fluorescence Distribution: {channel}")
+                    fig.tight_layout()
+                    sections.append(f"<section><h2>Fluorescence Distribution</h2>{self._html_img_tag(fig, channel)}</section>")
+                except Exception as exc:
+                    sections.append(self._html_error_section("Fluorescence Distribution", exc))
 
         if len(channel_cols) >= 2:
             x_channel, y_channel = channel_cols[:2]
-            corr_rows = []
-            x_group = "sample_name" if "sample_name" in intensity.columns else "well"
-            for group_key, group in intensity.groupby([x_group], dropna=False):
-                corr_input = group[[x_channel, y_channel]].apply(pd.to_numeric, errors="coerce").dropna()
-                if len(corr_input) < 2:
-                    continue
-                corr_value = corr_input[x_channel].corr(corr_input[y_channel])
-                if pd.notna(corr_value):
-                    corr_rows.append({x_group: group_key, "correlation": float(corr_value)})
-            corr_df = pd.DataFrame(corr_rows)
-            if not corr_df.empty:
-                fig = Figure(figsize=(10, 4.8), dpi=100)
-                ax = fig.add_subplot(111)
-                sns.barplot(data=corr_df, x=x_group, y="correlation", ax=ax)
-                ax.axhline(0, color="#666666", linewidth=1, linestyle="--")
-                ax.set_ylim(-1.05, 1.05)
-                ax.tick_params(axis="x", rotation=45)
-                ax.set_title(f"Correlation: {x_channel} vs {y_channel}")
-                fig.tight_layout()
-                sections.append(f"<section><h2>Channel Correlation</h2>{self._html_img_tag(fig, 'channel correlation')}</section>")
+            try:
+                corr_rows = []
+                x_group = "sample_name" if "sample_name" in intensity.columns else "well"
+                for group_key, group in intensity.groupby(x_group, dropna=False):
+                    corr_input = group[[x_channel, y_channel]].apply(pd.to_numeric, errors="coerce").dropna()
+                    if len(corr_input) < 2:
+                        continue
+                    corr_value = corr_input[x_channel].corr(corr_input[y_channel])
+                    if pd.notna(corr_value):
+                        corr_rows.append({x_group: group_key, "correlation": float(corr_value)})
+                corr_df = pd.DataFrame(corr_rows)
+                if not corr_df.empty:
+                    fig = Figure(figsize=(10, 4.8), dpi=100)
+                    ax = fig.add_subplot(111)
+                    sns.barplot(data=corr_df, x=x_group, y="correlation", ax=ax)
+                    ax.axhline(0, color="#666666", linewidth=1, linestyle="--")
+                    ax.set_ylim(-1.05, 1.05)
+                    ax.tick_params(axis="x", rotation=45)
+                    ax.set_title(f"Correlation: {x_channel} vs {y_channel}")
+                    fig.tight_layout()
+                    sections.append(f"<section><h2>Channel Correlation</h2>{self._html_img_tag(fig, 'channel correlation')}</section>")
+            except Exception as exc:
+                sections.append(self._html_error_section("Channel Correlation", exc))
 
         return "\n".join(sections)
 
