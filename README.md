@@ -69,6 +69,8 @@ When running as a bundled macOS app, the updater can also:
 - close the current app
 - replace the app bundle and relaunch it
 
+On Windows, the updater currently supports download and extraction of the packaged app, followed by manual folder replacement. Automatic in-place Windows app replacement is not implemented yet.
+
 ## Install
 
 ### Recommended: install into `biocompute-vscode-min`

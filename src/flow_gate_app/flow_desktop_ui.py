@@ -32,6 +32,24 @@ GITHUB_LATEST_RELEASE_API = f"https://api.github.com/repos/{GITHUB_REPO}/release
 DOWNLOADS_SUBDIR = "FlowGateAppUpdates"
 
 
+def _platform_key():
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform == "darwin":
+        return "macos"
+    return "other"
+
+
+def _open_path(path):
+    path = os.path.abspath(path)
+    if sys.platform.startswith("win"):
+        os.startfile(path)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", path], start_new_session=True)
+    else:
+        subprocess.Popen(["xdg-open", path], start_new_session=True)
+
+
 def _normalize_instrument_name(instrument):
     if instrument is None:
         return "cytoflex"
@@ -567,7 +585,13 @@ class FlowDesktopApp:
 
     def _app_home(self):
         if getattr(sys, "frozen", False):
-            base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "FlowGateApp")
+            if _platform_key() == "windows":
+                base_root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~")
+                base = os.path.join(base_root, "FlowGateApp")
+            elif _platform_key() == "macos":
+                base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "FlowGateApp")
+            else:
+                base = os.path.join(os.path.expanduser("~"), ".flowgateapp")
             os.makedirs(base, exist_ok=True)
             return base
         return os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -601,7 +625,12 @@ class FlowDesktopApp:
 
         names = {asset.get("name", ""): asset for asset in assets}
         if getattr(sys, "frozen", False):
-            for suffix in ("FlowGateApp-macos.zip", ".app.zip", ".zip"):
+            suffixes = ()
+            if _platform_key() == "macos":
+                suffixes = ("FlowGateApp-macos.zip", ".app.zip")
+            elif _platform_key() == "windows":
+                suffixes = ("FlowGateApp-windows.zip",)
+            for suffix in suffixes:
                 for name, asset in names.items():
                     if name.endswith(suffix):
                         return asset
@@ -629,7 +658,7 @@ class FlowDesktopApp:
         return destination
 
     def _current_app_bundle_path(self):
-        if not getattr(sys, "frozen", False):
+        if not getattr(sys, "frozen", False) or _platform_key() != "macos":
             return None
         executable = os.path.abspath(sys.executable)
         marker = ".app/Contents/MacOS/"
@@ -654,6 +683,18 @@ class FlowDesktopApp:
                 if directory.endswith(".app"):
                     return os.path.join(root, directory)
         raise FileNotFoundError("No .app bundle found in the downloaded zip.")
+
+    def _extract_windows_app_from_zip(self, zip_path):
+        extract_root = os.path.join(self._download_dir(), os.path.splitext(os.path.basename(zip_path))[0])
+        if os.path.isdir(extract_root):
+            shutil.rmtree(extract_root)
+        os.makedirs(extract_root, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(extract_root)
+        for root, _dirs, files in os.walk(extract_root):
+            if "FlowGateApp.exe" in files:
+                return root, os.path.join(root, "FlowGateApp.exe")
+        raise FileNotFoundError("No FlowGateApp.exe found in the downloaded zip.")
 
     def _write_update_helper_script(self, source_app, target_app):
         helper_path = os.path.join(self._app_home(), "install_downloaded_update.sh")
@@ -689,7 +730,7 @@ open "$TARGET_APP"
 
     def _assist_install_downloaded_asset(self, asset, destination, latest_tag):
         asset_name = asset.get("name", "")
-        if getattr(sys, "frozen", False) and asset_name.endswith(".zip"):
+        if getattr(sys, "frozen", False) and _platform_key() == "macos" and asset_name.endswith(".zip"):
             try:
                 extracted_app = self._extract_app_bundle_from_zip(destination)
                 current_app = self._current_app_bundle_path()
@@ -726,6 +767,23 @@ open "$TARGET_APP"
                     f"You can install it manually from the downloaded file.",
                 )
             return
+        if getattr(sys, "frozen", False) and _platform_key() == "windows" and asset_name.endswith(".zip"):
+            try:
+                extracted_dir, _extracted_exe = self._extract_windows_app_from_zip(destination)
+                messagebox.showinfo(
+                    "Update Downloaded",
+                    f"Downloaded and extracted {latest_tag}.\n\n"
+                    f"Folder:\n{extracted_dir}\n\n"
+                    f"For now, Windows updates are install-by-replacement:\n"
+                    f"1. Close the running app\n"
+                    f"2. Replace your current FlowGateApp folder with the extracted one\n"
+                    f"3. Launch FlowGateApp.exe\n",
+                )
+                _open_path(extracted_dir)
+                self.status_var.set(f"Downloaded Windows update to {extracted_dir}")
+            except Exception as exc:
+                self.status_var.set(f"Downloaded update but Windows handoff failed: {type(exc).__name__}: {exc}")
+            return
 
         install_msg = (
             f"Downloaded:\n{destination}\n\n"
@@ -740,7 +798,7 @@ open "$TARGET_APP"
             install_msg += "Open the containing folder now?"
         open_folder = messagebox.askyesno("Update Downloaded", install_msg)
         if open_folder:
-            webbrowser.open(f"file://{os.path.dirname(destination)}")
+            _open_path(os.path.dirname(destination))
 
     def check_for_updates(self):
         try:

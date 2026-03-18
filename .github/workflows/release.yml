@@ -87,9 +87,55 @@ jobs:
           name: macos-app
           path: dist/FlowGateApp-macos.zip
 
+  build-windows-app:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install app build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pyinstaller
+
+      - name: Build Windows app bundle
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --clean `
+            --windowed `
+            --name FlowGateApp `
+            --paths "${{ github.workspace }}\\src" `
+            --hidden-import tkinter `
+            --collect-submodules FlowCytometryTools `
+            --collect-submodules flow_gate_app `
+            "${{ github.workspace }}\\src\\flow_gate_app\\__main__.py"
+        shell: pwsh
+
+      - name: Zip Windows app
+        run: Compress-Archive -Path "dist/FlowGateApp/*" -DestinationPath "dist/FlowGateApp-windows.zip" -Force
+        shell: pwsh
+
+      - name: Upload Windows app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-app
+          path: dist/FlowGateApp-windows.zip
+
   create-release:
     if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != ''
-    needs: [build-wheel, build-macos-app]
+    needs: [build-wheel, build-macos-app, build-windows-app]
     runs-on: ubuntu-latest
     steps:
       - name: Download wheel artifacts
@@ -102,6 +148,12 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: macos-app
+          path: dist
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-app
           path: dist
 
       - name: Generate checksums
