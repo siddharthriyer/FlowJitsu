@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import os
 import re
@@ -5,6 +7,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from html import escape
 import urllib.request
 import webbrowser
 import zipfile
@@ -437,8 +440,9 @@ class FlowDesktopApp:
         ttk.Button(left, text="Export Intensities CSV", command=self.export_intensity_csv).grid(row=21, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(left, text="Analysis Preview", command=self.open_analysis_preview).grid(row=21, column=1, sticky="ew", padx=4, pady=(8, 0))
         ttk.Button(left, text="Open Analysis Notebook", command=self.create_and_open_analysis_notebook).grid(row=21, column=2, sticky="ew", pady=(8, 0))
-        ttk.Button(left, text="Check for Updates", command=self.check_for_updates).grid(row=22, column=0, sticky="ew", pady=(8, 0))
-        ttk.Label(left, textvariable=self.version_var).grid(row=22, column=1, columnspan=2, sticky="w", padx=4, pady=(8, 0))
+        ttk.Button(left, text="Export HTML Report", command=self.export_html_report).grid(row=22, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(left, text="Check for Updates", command=self.check_for_updates).grid(row=22, column=1, sticky="ew", padx=4, pady=(8, 0))
+        ttk.Label(left, textvariable=self.version_var).grid(row=22, column=2, sticky="w", padx=4, pady=(8, 0))
 
         ttk.Label(left, textvariable=self.mode_var, wraplength=480).grid(row=23, column=0, columnspan=3, sticky="w", pady=(10, 0))
         ttk.Label(left, textvariable=self.status_var, wraplength=480).grid(row=24, column=0, columnspan=3, sticky="w", pady=(6, 0))
@@ -2678,6 +2682,201 @@ open "$TARGET_APP"
             rows.append(row)
         return pd.DataFrame(rows)
 
+    def _analysis_bundle_paths(self):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        date_label = datetime.now().strftime("%Y-%m-%d")
+        export_root = self._default_export_dir()
+        export_dir = os.path.join(export_root, timestamp)
+        os.makedirs(export_dir, exist_ok=True)
+        return {
+            "timestamp": timestamp,
+            "date_label": date_label,
+            "export_dir": export_dir,
+            "summary_path": os.path.join(export_dir, "flow_gate_summary.csv"),
+            "intensity_path": os.path.join(export_dir, "flow_intensity_distribution.csv"),
+            "plate_path": os.path.join(export_dir, "plate_metadata.csv"),
+            "html_path": os.path.join(export_dir, f"{date_label}_flow_desktop_report.html"),
+            "notebook_path": os.path.join(self._app_home(), f"{date_label}_flow_desktop_analysis.ipynb"),
+        }
+
+    def _write_analysis_bundle_csvs(self, bundle_paths):
+        summary = self._summary_dataframe()
+        intensity = self._intensity_distribution_dataframe()
+        plate = self._plate_metadata_dataframe()
+        summary.to_csv(bundle_paths["summary_path"], index=False)
+        intensity.to_csv(bundle_paths["intensity_path"], index=False)
+        plate.to_csv(bundle_paths["plate_path"], index=False)
+        return summary, intensity, plate
+
+    def _figure_to_base64(self, fig):
+        buffer = io.BytesIO()
+        fig.savefig(buffer, format="png", dpi=140, bbox_inches="tight")
+        buffer.seek(0)
+        return base64.b64encode(buffer.read()).decode("ascii")
+
+    def _html_img_tag(self, fig, alt_text):
+        encoded = self._figure_to_base64(fig)
+        return f'<img alt="{escape(alt_text)}" src="data:image/png;base64,{encoded}" style="max-width: 100%; height: auto; border: 1px solid #ddd; border-radius: 6px;" />'
+
+    def _build_html_report_sections(self, summary, intensity, plate):
+        sections = []
+
+        sections.append(
+            "<section><h2>Summary</h2>"
+            f"<p>Samples: {len(summary)} | Gates: {len([c for c in summary.columns if c.startswith('pct_')])} | "
+            f"Events rows: {len(intensity)}</p></section>"
+        )
+
+        if not summary.empty:
+            preview = summary.head(24).to_html(index=False, classes="dataframe", border=0)
+            sections.append(f"<section><h2>Gate Summary Table</h2>{preview}</section>")
+
+        if not plate.empty:
+            plate_html = plate.head(96).to_html(index=False, classes="dataframe", border=0)
+            sections.append(f"<section><h2>Plate Metadata</h2>{plate_html}</section>")
+
+        pct_cols = [c for c in summary.columns if c.startswith("pct_")]
+        if pct_cols:
+            pct_col = pct_cols[0]
+            fig = Figure(figsize=(10, 4.8), dpi=100)
+            ax = fig.add_subplot(111)
+            xcol = "sample_name" if "sample_name" in summary.columns else "well"
+            sns.barplot(data=summary, x=xcol, y=pct_col, ax=ax)
+            ax.set_ylabel("% positive")
+            ax.tick_params(axis="x", rotation=45)
+            ax.set_title(f"{pct_col.replace('pct_', '')} % positive")
+            fig.tight_layout()
+            sections.append(f"<section><h2>Percent Positive</h2>{self._html_img_tag(fig, pct_col)}</section>")
+
+            if "dose" in summary.columns:
+                plot_df = summary.copy()
+                plot_df["dose"] = pd.to_numeric(plot_df["dose"], errors="coerce")
+                plot_df = plot_df.dropna(subset=["dose"])
+                if not plot_df.empty:
+                    fig = Figure(figsize=(7, 5), dpi=100)
+                    ax = fig.add_subplot(111)
+                    huecol = "sample_name" if "sample_name" in plot_df.columns else None
+                    stylecol = "replicate" if "replicate" in plot_df.columns else None
+                    sns.lineplot(
+                        data=plot_df,
+                        x="dose",
+                        y=pct_col,
+                        hue=huecol,
+                        style=stylecol,
+                        markers=True,
+                        dashes=False,
+                        ax=ax,
+                    )
+                    ax.set_xscale("log")
+                    ax.set_ylabel("% positive")
+                    ax.set_title(f"Dose Curve: {pct_col.replace('pct_', '')}")
+                    fig.tight_layout()
+                    sections.append(f"<section><h2>Dose Curve</h2>{self._html_img_tag(fig, 'dose curve')}</section>")
+
+            heatmap_df = summary[["well", pct_col]].dropna()
+            if not heatmap_df.empty:
+                plate_grid = np.full((8, 12), np.nan)
+                for _, row in heatmap_df.iterrows():
+                    well = str(row["well"])
+                    if re.match(r"^[A-H](?:[1-9]|1[0-2])$", well):
+                        plate_grid[ord(well[0]) - 65, int(well[1:]) - 1] = row[pct_col]
+                fig = Figure(figsize=(8, 3.8), dpi=100)
+                ax = fig.add_subplot(111)
+                sns.heatmap(
+                    plate_grid,
+                    ax=ax,
+                    cmap="viridis",
+                    vmin=0,
+                    vmax=100,
+                    annot=True,
+                    fmt=".1f",
+                    cbar_kws={"label": "% positive"},
+                )
+                ax.set_title(f"Well Heatmap: {pct_col.replace('pct_', '')}")
+                ax.set_xlabel("Column")
+                ax.set_ylabel("Row")
+                ax.set_xticklabels([str(i) for i in range(1, 13)], rotation=0)
+                ax.set_yticklabels(list("ABCDEFGH"), rotation=0)
+                fig.tight_layout()
+                sections.append(f"<section><h2>Well Heatmap</h2>{self._html_img_tag(fig, 'well heatmap')}</section>")
+
+        metadata_cols = {"well", "source", "sample_name", "treatment_group", "dose_curve", "dose", "replicate", "sample_type", "dose_direction", "excluded"}
+        bool_cols = {c for c in intensity.columns if c.startswith("in_")}
+        channel_cols = [c for c in intensity.columns if c not in metadata_cols and c not in bool_cols]
+        if channel_cols:
+            channel = channel_cols[0]
+            plot_df = intensity.copy()
+            plot_df[channel] = pd.to_numeric(plot_df[channel], errors="coerce")
+            plot_df = plot_df.dropna(subset=[channel])
+            plot_df = plot_df[plot_df[channel] > 0]
+            if not plot_df.empty:
+                fig = Figure(figsize=(8, 5), dpi=100)
+                ax = fig.add_subplot(111)
+                hue_col = "sample_name" if "sample_name" in plot_df.columns else ("well" if "well" in plot_df.columns else None)
+                sns.kdeplot(data=plot_df, x=channel, hue=hue_col, common_norm=False, fill=False, ax=ax)
+                ax.set_xscale("log")
+                ax.set_title(f"Fluorescence Distribution: {channel}")
+                fig.tight_layout()
+                sections.append(f"<section><h2>Fluorescence Distribution</h2>{self._html_img_tag(fig, channel)}</section>")
+
+        if len(channel_cols) >= 2:
+            x_channel, y_channel = channel_cols[:2]
+            corr_rows = []
+            x_group = "sample_name" if "sample_name" in intensity.columns else "well"
+            for group_key, group in intensity.groupby([x_group], dropna=False):
+                corr_input = group[[x_channel, y_channel]].apply(pd.to_numeric, errors="coerce").dropna()
+                if len(corr_input) < 2:
+                    continue
+                corr_value = corr_input[x_channel].corr(corr_input[y_channel])
+                if pd.notna(corr_value):
+                    corr_rows.append({x_group: group_key, "correlation": float(corr_value)})
+            corr_df = pd.DataFrame(corr_rows)
+            if not corr_df.empty:
+                fig = Figure(figsize=(10, 4.8), dpi=100)
+                ax = fig.add_subplot(111)
+                sns.barplot(data=corr_df, x=x_group, y="correlation", ax=ax)
+                ax.axhline(0, color="#666666", linewidth=1, linestyle="--")
+                ax.set_ylim(-1.05, 1.05)
+                ax.tick_params(axis="x", rotation=45)
+                ax.set_title(f"Correlation: {x_channel} vs {y_channel}")
+                fig.tight_layout()
+                sections.append(f"<section><h2>Channel Correlation</h2>{self._html_img_tag(fig, 'channel correlation')}</section>")
+
+        return "\n".join(sections)
+
+    def _analysis_html_document(self, summary, intensity, plate, bundle_paths):
+        body = self._build_html_report_sections(summary, intensity, plate)
+        summary_relpath = os.path.relpath(bundle_paths["summary_path"], os.path.dirname(bundle_paths["html_path"]))
+        intensity_relpath = os.path.relpath(bundle_paths["intensity_path"], os.path.dirname(bundle_paths["html_path"]))
+        plate_relpath = os.path.relpath(bundle_paths["plate_path"], os.path.dirname(bundle_paths["html_path"]))
+        title = f"{bundle_paths['date_label']} Flow Desktop Report"
+        return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{escape(title)}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 24px; line-height: 1.4; color: #1d1d1f; }}
+    h1, h2 {{ margin-bottom: 0.4rem; }}
+    section {{ margin: 28px 0; }}
+    .paths code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 4px; }}
+    table.dataframe {{ border-collapse: collapse; font-size: 0.92rem; }}
+    table.dataframe th, table.dataframe td {{ border: 1px solid #ddd; padding: 6px 8px; }}
+    table.dataframe th {{ background: #f7f7f7; }}
+  </style>
+</head>
+<body>
+  <h1>{escape(title)}</h1>
+  <p>Static analysis report exported from FlowGateApp. The raw data tables for this run are saved alongside this report.</p>
+  <div class="paths">
+    <p><strong>CSV exports:</strong> <code>{escape(summary_relpath)}</code>, <code>{escape(intensity_relpath)}</code>, <code>{escape(plate_relpath)}</code></p>
+  </div>
+  {body}
+</body>
+</html>
+"""
+
     def _analysis_notebook_dict(self, summary_relpath, intensity_relpath, plate_relpath, notebook_title):
         cells = [
             {
@@ -2877,37 +3076,38 @@ open "$TARGET_APP"
 
     def create_and_open_analysis_notebook(self):
         try:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            date_label = datetime.now().strftime("%Y-%m-%d")
-            export_root = self._default_export_dir()
-            export_dir = os.path.join(export_root, timestamp)
-            os.makedirs(export_dir, exist_ok=True)
-
-            summary_path = os.path.join(export_dir, "flow_gate_summary.csv")
-            intensity_path = os.path.join(export_dir, "flow_intensity_distribution.csv")
-            plate_path = os.path.join(export_dir, "plate_metadata.csv")
-            notebook_filename = f"{date_label}_flow_desktop_analysis.ipynb"
-            notebook_path = os.path.join(self._app_home(), notebook_filename)
-
-            self._summary_dataframe().to_csv(summary_path, index=False)
-            self._intensity_distribution_dataframe().to_csv(intensity_path, index=False)
-            self._plate_metadata_dataframe().to_csv(plate_path, index=False)
+            bundle_paths = self._analysis_bundle_paths()
+            self._write_analysis_bundle_csvs(bundle_paths)
 
             nb = self._analysis_notebook_dict(
-                summary_relpath=os.path.relpath(summary_path, os.path.dirname(notebook_path)),
-                intensity_relpath=os.path.relpath(intensity_path, os.path.dirname(notebook_path)),
-                plate_relpath=os.path.relpath(plate_path, os.path.dirname(notebook_path)),
-                notebook_title=f"{date_label} Flow Desktop Analysis",
+                summary_relpath=os.path.relpath(bundle_paths["summary_path"], os.path.dirname(bundle_paths["notebook_path"])),
+                intensity_relpath=os.path.relpath(bundle_paths["intensity_path"], os.path.dirname(bundle_paths["notebook_path"])),
+                plate_relpath=os.path.relpath(bundle_paths["plate_path"], os.path.dirname(bundle_paths["notebook_path"])),
+                notebook_title=f"{bundle_paths['date_label']} Flow Desktop Analysis",
             )
-            with open(notebook_path, "w") as fh:
+            with open(bundle_paths["notebook_path"], "w") as fh:
                 json.dump(nb, fh, indent=1)
 
             self.gate_status_var.set(
-                f"Saved notebook: {notebook_path} | "
-                f"CSVs: {summary_path}, {intensity_path}, {plate_path}"
+                f"Saved notebook: {bundle_paths['notebook_path']} | "
+                f"CSVs: {bundle_paths['summary_path']}, {bundle_paths['intensity_path']}, {bundle_paths['plate_path']}"
             )
         except Exception as exc:
             self.gate_status_var.set(f"Failed to create analysis notebook: {type(exc).__name__}: {exc}")
+
+    def export_html_report(self):
+        try:
+            bundle_paths = self._analysis_bundle_paths()
+            summary, intensity, plate = self._write_analysis_bundle_csvs(bundle_paths)
+            html_document = self._analysis_html_document(summary, intensity, plate, bundle_paths)
+            with open(bundle_paths["html_path"], "w", encoding="utf-8") as fh:
+                fh.write(html_document)
+            self.gate_status_var.set(
+                f"Saved HTML report: {bundle_paths['html_path']} | "
+                f"CSVs: {bundle_paths['summary_path']}, {bundle_paths['intensity_path']}, {bundle_paths['plate_path']}"
+            )
+        except Exception as exc:
+            self.gate_status_var.set(f"Failed to export HTML report: {type(exc).__name__}: {exc}")
 
     def get_gate_specs(self):
         return list(self.gates)
