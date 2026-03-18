@@ -118,6 +118,10 @@ def open_analysis_preview(self):
     x_max_var = tk.StringVar(value="")
     y_min_var = tk.StringVar(value="")
     y_max_var = tk.StringVar(value="")
+    normalization_mode_var = tk.StringVar(value="raw_percent")
+    control_group_var = tk.StringVar(value="global")
+    negative_control_var = tk.StringVar(value="negative_control")
+    positive_control_var = tk.StringVar(value="positive_control")
     sample_names = sorted({
         str(value).strip()
         for value in pd.concat(
@@ -152,14 +156,26 @@ def open_analysis_preview(self):
     ttk.Combobox(controls, textvariable=x_axis_var, values=[c for c in ["sample_name", "well", "dose_curve", "dose"] if c in summary.columns], state="readonly", width=16).grid(row=1, column=2, padx=4)
     ttk.Label(controls, text="Bar Hue").grid(row=0, column=3, sticky="w")
     ttk.Combobox(controls, textvariable=hue_var, values=["", "replicate", "sample_name", "dose_curve"], state="readonly", width=14).grid(row=1, column=3, padx=4)
-    ttk.Label(controls, text="Intensity / Corr X").grid(row=0, column=4, sticky="w")
-    ttk.Combobox(controls, textvariable=channel_var, values=channel_cols, state="readonly", width=22).grid(row=1, column=4, padx=4)
+    channel_label = ttk.Label(controls, text="Intensity Channel")
+    channel_label.grid(row=0, column=4, sticky="w")
+    channel_combo = ttk.Combobox(controls, textvariable=channel_var, values=channel_cols, state="readonly", width=22)
+    channel_combo.grid(row=1, column=4, padx=4)
     ttk.Label(controls, text="Gate Filter").grid(row=0, column=5, sticky="w")
     ttk.Combobox(controls, textvariable=gate_filter_var, values=[""] + bool_cols, state="readonly", width=22).grid(row=1, column=5, padx=4)
     ttk.Label(controls, text="Dist Hue").grid(row=0, column=6, sticky="w")
     ttk.Combobox(controls, textvariable=hue_dist_var, values=[c for c in ["sample_name", "well", "dose_curve"] if c in intensity.columns], state="readonly", width=16).grid(row=1, column=6, padx=4)
-    ttk.Label(controls, text="Corr Y").grid(row=0, column=7, sticky="w")
-    ttk.Combobox(controls, textvariable=corr_channel_y_var, values=channel_cols, state="readonly", width=22).grid(row=1, column=7, padx=4)
+    corr_y_label = ttk.Label(controls, text="Correlation Y")
+    corr_y_label.grid(row=0, column=7, sticky="w")
+    corr_y_combo = ttk.Combobox(controls, textvariable=corr_channel_y_var, values=channel_cols, state="readonly", width=22)
+    corr_y_combo.grid(row=1, column=7, padx=4)
+    ttk.Label(controls, text="Bar Metric").grid(row=0, column=8, sticky="w")
+    ttk.Combobox(controls, textvariable=normalization_mode_var, values=["raw_percent", "delta_vs_negative", "fold_vs_negative", "percent_of_positive", "minmax_neg_to_pos"], state="readonly", width=20).grid(row=1, column=8, padx=4)
+    ttk.Label(controls, text="Control Compare").grid(row=0, column=9, sticky="w")
+    ttk.Combobox(controls, textvariable=control_group_var, values=["global", "x_axis", "sample_name", "dose_curve", "treatment_group", "replicate", "well"], state="readonly", width=18).grid(row=1, column=9, padx=4)
+    ttk.Label(controls, text="Negative Label").grid(row=0, column=10, sticky="w")
+    ttk.Entry(controls, textvariable=negative_control_var, width=18).grid(row=1, column=10, padx=4, sticky="ew")
+    ttk.Label(controls, text="Positive Label").grid(row=0, column=11, sticky="w")
+    ttk.Entry(controls, textvariable=positive_control_var, width=18).grid(row=1, column=11, padx=4, sticky="ew")
     ttk.Label(controls, text="Plot Title").grid(row=2, column=0, sticky="w", pady=(10, 0))
     ttk.Entry(controls, textvariable=plot_title_var, width=20).grid(row=3, column=0, padx=4, sticky="ew")
     ttk.Label(controls, text="X Title").grid(row=2, column=1, sticky="w", pady=(10, 0))
@@ -412,6 +428,76 @@ def open_analysis_preview(self):
         _apply_prism_bar_style(ax)
         _apply_prism_legend_style(ax)
 
+    def _update_plot_control_visibility(*_args):
+        mode = plot_mode_var.get()
+        if mode == "correlation":
+            channel_label.configure(text="Correlation X")
+            corr_y_label.grid()
+            corr_y_combo.grid()
+        else:
+            channel_label.configure(text="Intensity Channel")
+            corr_y_label.grid_remove()
+            corr_y_combo.grid_remove()
+
+    def _control_group_key(row, xcol):
+        mode = control_group_var.get()
+        if mode == "global":
+            return "__global__"
+        if mode == "x_axis":
+            return row.get(xcol, "")
+        return row.get(mode, "")
+
+    def _normalized_bar_dataframe(plot_df, value_col, xcol):
+        mode = normalization_mode_var.get()
+        if mode == "raw_percent":
+            return plot_df, value_col, "% positive", None
+
+        normalized = plot_df.copy()
+        normalized["_control_group"] = normalized.apply(lambda row: _control_group_key(row, xcol), axis=1)
+        neg_label = negative_control_var.get().strip()
+        pos_label = positive_control_var.get().strip()
+        neg_means = {}
+        pos_means = {}
+        if neg_label:
+            neg_rows = normalized[normalized["sample_type"].astype(str).str.strip() == neg_label]
+            neg_means = neg_rows.groupby("_control_group")[value_col].mean().to_dict() if not neg_rows.empty else {}
+        if pos_label:
+            pos_rows = normalized[normalized["sample_type"].astype(str).str.strip() == pos_label]
+            pos_means = pos_rows.groupby("_control_group")[value_col].mean().to_dict() if not pos_rows.empty else {}
+
+        out_col = f"{value_col}__normalized"
+
+        def _convert(row):
+            value = row[value_col]
+            group_key = row["_control_group"]
+            neg = neg_means.get(group_key)
+            pos = pos_means.get(group_key)
+            if mode == "delta_vs_negative":
+                return np.nan if neg is None else value - neg
+            if mode == "fold_vs_negative":
+                return np.nan if neg in (None, 0) else value / neg
+            if mode == "percent_of_positive":
+                return np.nan if pos in (None, 0) else 100.0 * value / pos
+            if mode == "minmax_neg_to_pos":
+                if neg is None or pos is None or np.isclose(pos, neg):
+                    return np.nan
+                return 100.0 * (value - neg) / (pos - neg)
+            return value
+
+        normalized[out_col] = normalized.apply(_convert, axis=1)
+        normalized = normalized.dropna(subset=[out_col]).copy()
+
+        labels = {
+            "delta_vs_negative": ("% positive - negative control", "Delta vs negative control"),
+            "fold_vs_negative": ("Fold vs negative control", "Fold vs negative control"),
+            "percent_of_positive": ("% of positive control", "Percent of positive control"),
+            "minmax_neg_to_pos": ("Normalized 0-100", "Normalized between negative and positive controls"),
+        }
+        ylabel, title = labels.get(mode, ("% positive", None))
+        if normalized.empty:
+            return normalized, out_col, ylabel, "No matching controls found for the selected normalization mode."
+        return normalized, out_col, ylabel, title
+
     def redraw_preview(*_args):
         ax.clear()
         mode = plot_mode_var.get()
@@ -423,16 +509,22 @@ def open_analysis_preview(self):
             plot_df = summary.copy()
             xcol = x_axis_var.get() if x_axis_var.get() in plot_df.columns else "well"
             huecol = hue_var.get() if hue_var.get() in plot_df.columns and hue_var.get() else None
+            plot_df, ycol, y_label, normalization_title = _normalized_bar_dataframe(plot_df, pct_col_var.get(), xcol)
+            if plot_df.empty:
+                ax.set_title(normalization_title or "No bar data available")
+                canvas.draw_idle()
+                return
             if huecol == "sample_name":
-                _sns().barplot(data=plot_df, x=xcol, y=pct_col_var.get(), hue=huecol, palette=_palette_for_hue("sample_name"), capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
+                _sns().barplot(data=plot_df, x=xcol, y=ycol, hue=huecol, palette=_palette_for_hue("sample_name"), capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
             elif huecol is None and xcol == "sample_name":
                 sample_palette = _palette_for_hue("sample_name") or {}
                 order = list(plot_df[xcol].dropna().astype(str).unique())
                 colors = [sample_palette.get(name, PRISM_STYLE["bar_fill"]) for name in order]
-                _sns().barplot(data=plot_df, x=xcol, y=pct_col_var.get(), order=order, palette=colors, saturation=1, capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
+                _sns().barplot(data=plot_df, x=xcol, y=ycol, order=order, palette=colors, saturation=1, capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
             else:
-                _sns().barplot(data=plot_df, x=xcol, y=pct_col_var.get(), hue=huecol, color=PRISM_STYLE["bar_fill"], saturation=1, capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
-            _apply_plot_formatting(default_title=pct_col_var.get().replace("pct_", "") if pct_col_var.get() else "Percent Positive", default_xlabel=xcol, default_ylabel="% positive")
+                _sns().barplot(data=plot_df, x=xcol, y=ycol, hue=huecol, color=PRISM_STYLE["bar_fill"], saturation=1, capsize=PRISM_STYLE["errorbar_capsize"], ax=ax)
+            default_title = normalization_title or (pct_col_var.get().replace("pct_", "") if pct_col_var.get() else "Percent Positive")
+            _apply_plot_formatting(default_title=default_title, default_xlabel=xcol, default_ylabel=y_label)
             ax.tick_params(axis="x", rotation=45)
             fig.tight_layout()
             canvas.draw_idle()
@@ -481,13 +573,34 @@ def open_analysis_preview(self):
             ax.set_ylim(-1.05, 1.05); ax.axhline(0, color="#666666", linewidth=1.6, linestyle="--"); ax.tick_params(axis="x", rotation=45)
             _apply_plot_formatting(default_title=f"Correlation: {channel_var.get()} vs {corr_channel_y_var.get()}", default_xlabel=xcol, default_ylabel="correlation")
             fig.tight_layout(); canvas.draw_idle(); return
-        _sns().kdeplot(data=plot_df, x=channel_var.get(), hue=huecol, common_norm=False, fill=False, palette=_palette_for_hue(huecol), ax=ax)
-        ax.set_xscale("log")
-        _apply_plot_formatting(default_title="Fluorescence distribution", default_xlabel=channel_var.get(), default_ylabel="density")
+        group_col = huecol or "__distribution_group__"
+        if group_col == "__distribution_group__":
+            plot_df[group_col] = "All Events"
+        palette = _palette_for_hue(group_col) if group_col == "sample_name" else None
+        violin_kwargs = {
+            "data": plot_df,
+            "x": group_col,
+            "y": channel_var.get(),
+            "ax": ax,
+            "cut": 0,
+            "inner": "quart",
+            "linewidth": 1.6,
+        }
+        if palette is not None:
+            violin_kwargs["palette"] = palette
+        else:
+            violin_kwargs["color"] = PRISM_STYLE["bar_fill"]
+        _sns().violinplot(**violin_kwargs)
+        ax.set_yscale("log")
+        ax.tick_params(axis="x", rotation=45)
+        _apply_plot_formatting(default_title="Fluorescence distribution", default_xlabel=("" if group_col == "__distribution_group__" else group_col), default_ylabel=channel_var.get())
         fig.tight_layout()
         canvas.draw_idle()
 
-    for var in [plot_mode_var, pct_col_var, x_axis_var, hue_var, channel_var, corr_channel_y_var, gate_filter_var, hue_dist_var, plot_title_var, x_title_var, y_title_var, x_min_var, x_max_var, y_min_var, y_max_var]:
+    plot_mode_var.trace_add("write", _update_plot_control_visibility)
+    _update_plot_control_visibility()
+
+    for var in [plot_mode_var, pct_col_var, x_axis_var, hue_var, channel_var, corr_channel_y_var, gate_filter_var, hue_dist_var, plot_title_var, x_title_var, y_title_var, x_min_var, x_max_var, y_min_var, y_max_var, normalization_mode_var, control_group_var, negative_control_var, positive_control_var]:
         var.trace_add("write", redraw_preview)
     _refresh_group_boxes()
     redraw_preview()

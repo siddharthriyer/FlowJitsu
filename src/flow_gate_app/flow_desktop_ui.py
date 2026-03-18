@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import re
@@ -66,6 +67,8 @@ from .plate_views import open_plate_map_editor as _open_plate_map_editor_impl
 _SNS = None
 PRISM_AXIS_LINEWIDTH = 2.0
 PRISM_LEGEND_LINEWIDTH = 1.8
+ROBUST_AXIS_LOWER_Q = 0.01
+ROBUST_AXIS_UPPER_Q = 0.99
 
 
 def _sns():
@@ -118,6 +121,15 @@ class FlowDesktopApp:
         self.cofactor_var = tk.DoubleVar(value=150.0)
         self.max_points_var = tk.IntVar(value=self.max_points_default)
         self.y_plot_mode_var = tk.StringVar(value="scatter")
+        self.compensation_enabled = tk.BooleanVar(value=False)
+        self.compensation_source_channels = []
+        self.compensation_channels = []
+        self.compensation_matrix = None
+        self.compensation_text = ""
+        self.scatter_xmin_override = None
+        self.scatter_xmax_override = None
+        self.scatter_ymin_override = None
+        self.scatter_ymax_override = None
         self.gate_type_var = tk.StringVar(value="polygon")
         self.gate_name_var = tk.StringVar(value="gate_1")
         self.quad_region_var = tk.StringVar(value="top right")
@@ -180,6 +192,7 @@ class FlowDesktopApp:
 
         self._init_styles()
         self._build_ui()
+        self._update_compensation_status()
         self.root.after_idle(self._set_initial_pane_sizes)
         self._refresh_recent_sessions()
         self._bind_events()
@@ -311,6 +324,9 @@ class FlowDesktopApp:
         ttk.Label(data_frame, text="Wells").grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.well_listbox = tk.Listbox(data_frame, selectmode=tk.EXTENDED, width=48, height=12, exportselection=False)
         self.well_listbox.grid(row=5, column=0, columnspan=3, sticky="ew")
+        self._secondary_button(data_frame, "Compensation", self.open_compensation_editor, row=6, column=0, sticky="ew", pady=(8, 0))
+        self.compensation_status_var = tk.StringVar(value="Compensation: off")
+        ttk.Label(data_frame, textvariable=self.compensation_status_var, wraplength=470).grid(row=6, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(10, 0))
 
         plot_frame = section(left, "Plot")
         config_grid(plot_frame, 3)
@@ -333,6 +349,7 @@ class FlowDesktopApp:
         ttk.Label(plot_frame, text="Cofactor").grid(row=4, column=1, sticky="w", pady=(10, 0))
         ttk.Combobox(plot_frame, textvariable=self.transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=5, column=0, sticky="ew")
         ttk.Spinbox(plot_frame, from_=1.0, to=10000.0, increment=10.0, textvariable=self.cofactor_var, width=12).grid(row=5, column=1, sticky="ew", padx=4)
+        self._secondary_button(plot_frame, "Axes Limits", self.open_axes_limits_dialog, row=5, column=2, sticky="ew")
 
         gate_frame = section(left, "Gating")
         config_grid(gate_frame, 3)
@@ -857,6 +874,649 @@ class FlowDesktopApp:
         os.makedirs(download_dir, exist_ok=True)
         return download_dir
 
+    def _update_compensation_status(self):
+        if self.compensation_enabled.get() and self.compensation_matrix is not None and self.compensation_channels:
+            self.compensation_status_var.set(f"Compensation: on ({len(self.compensation_channels)} channels)")
+        elif self.compensation_text.strip():
+            self.compensation_status_var.set("Compensation: configured but disabled")
+        else:
+            self.compensation_status_var.set("Compensation: off")
+
+    def _compensation_payload(self):
+        return {
+            "enabled": bool(self.compensation_enabled.get()),
+            "source_channels": list(self.compensation_source_channels),
+            "channels": list(self.compensation_channels),
+            "matrix": self.compensation_matrix.tolist() if isinstance(self.compensation_matrix, np.ndarray) else None,
+            "text": self.compensation_text,
+        }
+
+    def _load_compensation_payload(self, payload):
+        payload = payload or {}
+        self.compensation_enabled.set(bool(payload.get("enabled", False)))
+        self.compensation_source_channels = list(payload.get("source_channels", []) or [])
+        self.compensation_channels = list(payload.get("channels", []) or [])
+        matrix = payload.get("matrix")
+        self.compensation_matrix = np.asarray(matrix, dtype=float) if matrix is not None else None
+        self.compensation_text = str(payload.get("text", "") or "")
+        if self.compensation_matrix is not None and (
+            self.compensation_matrix.ndim != 2
+            or self.compensation_matrix.shape[0] != self.compensation_matrix.shape[1]
+            or self.compensation_matrix.shape[0] != len(self.compensation_channels)
+        ):
+            self.compensation_matrix = None
+            self.compensation_source_channels = []
+            self.compensation_channels = []
+            self.compensation_enabled.set(False)
+        self._update_compensation_status()
+
+    def _parse_compensation_text(self, text):
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("Compensation matrix text is empty.")
+        frame = pd.read_csv(io.StringIO(text), sep=None, engine="python", index_col=0)
+        if frame.empty:
+            raise ValueError("Compensation matrix could not be parsed.")
+        frame.columns = [str(col).strip() for col in frame.columns]
+        frame.index = [str(idx).strip() for idx in frame.index]
+        if frame.shape[0] != frame.shape[1]:
+            raise ValueError("Compensation matrix must be square.")
+        if list(frame.index) != list(frame.columns):
+            raise ValueError("Compensation matrix row and column labels must match.")
+        matrix = frame.apply(pd.to_numeric, errors="raise").to_numpy(dtype=float)
+        return list(frame.columns), matrix
+
+    def _parse_spill_string(self, raw_value):
+        if raw_value is None:
+            raise ValueError("Compensation metadata field is empty.")
+        text = str(raw_value).strip()
+        if not text:
+            raise ValueError("Compensation metadata field is empty.")
+        parts = [part.strip() for part in text.replace("\n", ",").split(",") if part.strip()]
+        if not parts:
+            raise ValueError("Compensation metadata field is empty.")
+        size = int(float(parts[0]))
+        expected = 1 + size + size * size
+        if len(parts) < expected:
+            raise ValueError("Compensation metadata is incomplete.")
+        channels = parts[1:1 + size]
+        values = [float(part) for part in parts[1 + size:1 + size + size * size]]
+        matrix = np.asarray(values, dtype=float).reshape(size, size)
+        return channels, matrix
+
+    def _extract_compensation_from_sample_meta(self, sample):
+        meta = getattr(sample, "meta", None)
+        if not isinstance(meta, dict):
+            raise ValueError("Sample metadata is unavailable.")
+        for key in ("SPILL", "$SPILL", "SPILLOVER", "$SPILLOVER"):
+            if key in meta and meta.get(key):
+                return self._parse_spill_string(meta.get(key))
+        raise ValueError("No SPILL/SPILLOVER compensation metadata was found in the sample.")
+
+    def _normalize_channel_token(self, value):
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+    def _default_compensation_mapping(self, source_channels):
+        used = set()
+        mapping = []
+        normalized_targets = {self._normalize_channel_token(channel): channel for channel in self.channel_names}
+        for source in source_channels:
+            direct = source if source in self.channel_names and source not in used else None
+            if direct is None:
+                direct = normalized_targets.get(self._normalize_channel_token(source))
+                if direct in used:
+                    direct = None
+            if direct is None:
+                source_norm = self._normalize_channel_token(source)
+                for channel in self.channel_names:
+                    channel_norm = self._normalize_channel_token(channel)
+                    if channel not in used and (source_norm in channel_norm or channel_norm in source_norm):
+                        direct = channel
+                        break
+            if direct is None:
+                direct = ""
+            else:
+                used.add(direct)
+            mapping.append(direct)
+        return mapping
+
+    def _open_compensation_channel_mapping_dialog(self, source_channels, initial_mapping=None, parent=None):
+        if not self.channel_names:
+            raise ValueError("Load a folder before mapping compensation channels.")
+        dialog = tk.Toplevel(parent or self.root)
+        dialog.title("Match Compensation Channels")
+        dialog.transient(parent or self.root)
+        dialog.grab_set()
+        dialog.columnconfigure(1, weight=1)
+        selected = []
+        defaults = initial_mapping or self._default_compensation_mapping(source_channels)
+        for idx, source in enumerate(source_channels):
+            ttk.Label(dialog, text=source).grid(row=idx, column=0, sticky="w", padx=10, pady=4)
+            var = tk.StringVar(value=defaults[idx] if idx < len(defaults) else "")
+            combo = ttk.Combobox(dialog, textvariable=var, values=self.channel_names, state="readonly", width=28)
+            combo.grid(row=idx, column=1, sticky="ew", padx=10, pady=4)
+            selected.append(var)
+
+        result = {"mapping": None}
+
+        def _apply_mapping():
+            mapping = [var.get().strip() for var in selected]
+            if any(not value for value in mapping):
+                messagebox.showerror("Channel Mapping", "Every compensation source channel must be matched.", parent=dialog)
+                return
+            if len(set(mapping)) != len(mapping):
+                messagebox.showerror("Channel Mapping", "Each compensation source channel must map to a unique app channel.", parent=dialog)
+                return
+            result["mapping"] = mapping
+            dialog.destroy()
+
+        button_row = ttk.Frame(dialog)
+        button_row.grid(row=len(source_channels), column=0, columnspan=2, sticky="e", padx=10, pady=(10, 10))
+        ttk.Button(button_row, text="Apply", command=_apply_mapping).grid(row=0, column=0)
+        ttk.Button(button_row, text="Cancel", command=dialog.destroy).grid(row=0, column=1, padx=(6, 0))
+        dialog.wait_window()
+        return result["mapping"]
+
+    def _apply_compensation(self, df):
+        if not self.compensation_enabled.get() or self.compensation_matrix is None or not self.compensation_channels:
+            return df
+        channels = [channel for channel in self.compensation_channels if channel in df.columns]
+        if len(channels) != len(self.compensation_channels):
+            return df
+        try:
+            inverse = np.linalg.pinv(self.compensation_matrix)
+        except Exception as exc:
+            self.status_var.set(f"Compensation failed: {type(exc).__name__}: {exc}")
+            return df
+        compensated = df.copy()
+        values = compensated[channels].to_numpy(dtype=float)
+        compensated_values = values @ inverse.T
+        compensated.loc[:, channels] = compensated_values
+        return compensated
+
+    def open_compensation_editor(self):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Compensation")
+        dialog.geometry("980x680")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.rowconfigure(2, weight=1)
+        dialog.rowconfigure(3, weight=1)
+        dialog.columnconfigure(0, weight=1)
+        dialog.columnconfigure(1, weight=1)
+
+        enabled_var = tk.BooleanVar(value=self.compensation_enabled.get())
+        mapped_channels = list(self.compensation_channels)
+        source_channels = list(self.compensation_source_channels or self.compensation_channels)
+        text_widget = tk.Text(dialog, wrap="none", height=18)
+        text_widget.grid(row=2, column=0, sticky="nsew", padx=(10, 5), pady=(0, 10))
+        if self.compensation_text.strip():
+            text_widget.insert("1.0", self.compensation_text)
+        elif self.channel_names:
+            channels = [ch for ch in self.channel_names if not any(token in ch for token in ("FSC", "SSC", "Time"))]
+            if channels:
+                header = "," + ",".join(channels)
+                rows = [f"{channel}," + ",".join("1" if i == j else "0" for j in range(len(channels))) for i, channel in enumerate(channels)]
+                text_widget.insert("1.0", "\n".join([header] + rows))
+        ttk.Checkbutton(dialog, text="Enable compensation", variable=enabled_var).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
+        ttk.Label(
+            dialog,
+            text="Paste a square spillover matrix with matching row/column channel labels. CSV or TSV works. Compensation is applied before transform and gating.",
+            wraplength=720,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", padx=10, pady=(0, 10))
+
+        preview_frame = ttk.LabelFrame(dialog, text="Preview", padding=10)
+        preview_frame.grid(row=2, column=1, rowspan=2, sticky="nsew", padx=(5, 10), pady=(0, 10))
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(1, weight=1)
+
+        preview_controls = ttk.Frame(preview_frame)
+        preview_controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        preview_sample_var = tk.StringVar(value=next(iter(self.file_map.keys()), ""))
+        preview_x_var = tk.StringVar(value="")
+        preview_y_var = tk.StringVar(value="")
+        ttk.Label(preview_controls, text="Sample").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(preview_controls, textvariable=preview_sample_var, values=list(self.file_map.keys()), state="readonly", width=14).grid(row=1, column=0, padx=(0, 6))
+        ttk.Label(preview_controls, text="X").grid(row=0, column=1, sticky="w")
+        ttk.Label(preview_controls, text="Y").grid(row=0, column=2, sticky="w")
+
+        compensation_preview_figure = Figure(figsize=(5.2, 4.2), dpi=100)
+        before_ax = compensation_preview_figure.add_subplot(121)
+        after_ax = compensation_preview_figure.add_subplot(122)
+        preview_canvas = FigureCanvasTkAgg(compensation_preview_figure, master=preview_frame)
+        preview_canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew")
+
+        def _effective_preview_channels():
+            channels = [ch for ch in (mapped_channels or self.compensation_channels or self.channel_names) if ch in self.channel_names]
+            fluorescence = [ch for ch in channels if not any(token in ch for token in ("FSC", "SSC", "Time"))]
+            return fluorescence or channels
+
+        preview_channel_values = _effective_preview_channels()
+        if preview_channel_values:
+            preview_x_var.set(preview_channel_values[0])
+            preview_y_var.set(preview_channel_values[1] if len(preview_channel_values) > 1 else preview_channel_values[0])
+        preview_x_combo = ttk.Combobox(preview_controls, textvariable=preview_x_var, values=preview_channel_values, state="readonly", width=18)
+        preview_x_combo.grid(row=1, column=1, padx=(0, 6))
+        preview_y_combo = ttk.Combobox(preview_controls, textvariable=preview_y_var, values=preview_channel_values, state="readonly", width=18)
+        preview_y_combo.grid(row=1, column=2, padx=(0, 6))
+
+        def _refresh_preview_channel_choices():
+            values = _effective_preview_channels()
+            preview_x_combo["values"] = values
+            preview_y_combo["values"] = values
+            if values:
+                if preview_x_var.get() not in values:
+                    preview_x_var.set(values[0])
+                if preview_y_var.get() not in values:
+                    preview_y_var.set(values[1] if len(values) > 1 else values[0])
+
+        def _preview_dataframes():
+            label = preview_sample_var.get().strip()
+            if not label or label not in self.file_map:
+                return None, None
+            sample = self._load_sample(self.file_map[label])
+            raw_df = sample.data.copy()
+            x_channel = preview_x_var.get().strip()
+            y_channel = preview_y_var.get().strip()
+            if not x_channel or not y_channel or x_channel not in raw_df.columns or y_channel not in raw_df.columns:
+                return raw_df, None
+            if not mapped_channels or self.compensation_matrix is None:
+                return raw_df, None
+            temp_df = raw_df.copy()
+            original_enabled = self.compensation_enabled.get()
+            original_channels = list(self.compensation_channels)
+            try:
+                self.compensation_channels = list(mapped_channels)
+                self.compensation_enabled.set(True)
+                compensated_df = self._apply_compensation(temp_df)
+            finally:
+                self.compensation_channels = original_channels
+                self.compensation_enabled.set(original_enabled)
+            return raw_df, compensated_df
+
+        def _update_preview(*_args):
+            before_ax.clear()
+            after_ax.clear()
+            raw_df, compensated_df = _preview_dataframes()
+            x_channel = preview_x_var.get().strip()
+            y_channel = preview_y_var.get().strip()
+            if raw_df is None or not x_channel or not y_channel or x_channel not in raw_df.columns or y_channel not in raw_df.columns:
+                before_ax.set_title("No preview")
+                after_ax.set_title("No preview")
+                preview_canvas.draw_idle()
+                return
+            raw_plot = raw_df[[x_channel, y_channel]].dropna().sample(n=min(len(raw_df), 3000), random_state=0) if not raw_df.empty else raw_df
+            before_ax.scatter(raw_plot[x_channel], raw_plot[y_channel], s=2, alpha=0.2, color="#5b8fd1", rasterized=True)
+            before_ax.set_title("Before")
+            before_ax.set_xlabel(x_channel)
+            before_ax.set_ylabel(y_channel)
+            _apply_prism_axis_style(before_ax)
+            if compensated_df is not None and x_channel in compensated_df.columns and y_channel in compensated_df.columns:
+                comp_plot = compensated_df[[x_channel, y_channel]].dropna().sample(n=min(len(compensated_df), 3000), random_state=0) if not compensated_df.empty else compensated_df
+                after_ax.scatter(comp_plot[x_channel], comp_plot[y_channel], s=2, alpha=0.2, color="#d46a6a", rasterized=True)
+                after_ax.set_title("After")
+                after_ax.set_xlabel(x_channel)
+                after_ax.set_ylabel(y_channel)
+                _apply_prism_axis_style(after_ax)
+            else:
+                after_ax.set_title("After")
+                after_ax.text(0.5, 0.5, "No active compensation", ha="center", va="center", transform=after_ax.transAxes)
+            compensation_preview_figure.tight_layout()
+            preview_canvas.draw_idle()
+
+        def _load_file():
+            filename = filedialog.askopenfilename(parent=dialog, filetypes=[("CSV/TSV files", "*.csv *.tsv *.txt"), ("All files", "*.*")])
+            if not filename:
+                return
+            try:
+                with open(filename) as fh:
+                    text = fh.read()
+                text_widget.delete("1.0", tk.END)
+                text_widget.insert("1.0", text)
+            except Exception as exc:
+                messagebox.showerror("Compensation", f"Failed to load matrix file:\n{exc}", parent=dialog)
+
+        def _match_channels():
+            nonlocal mapped_channels, source_channels
+            text = text_widget.get("1.0", tk.END).strip()
+            if not text:
+                messagebox.showinfo("Compensation", "Load or paste a compensation matrix first.", parent=dialog)
+                return
+            try:
+                source_channels, _matrix = self._parse_compensation_text(text)
+            except Exception as exc:
+                messagebox.showerror("Compensation", f"Invalid compensation matrix:\n{exc}", parent=dialog)
+                return
+            mapping = self._open_compensation_channel_mapping_dialog(source_channels, initial_mapping=mapped_channels, parent=dialog)
+            if mapping:
+                mapped_channels = mapping
+                _refresh_preview_channel_choices()
+                _update_preview()
+
+        def _auto_detect():
+            nonlocal source_channels, mapped_channels
+            if not self.file_map:
+                messagebox.showinfo("Compensation", "Load a folder first.", parent=dialog)
+                return
+            sample = self._load_sample(next(iter(self.file_map.values())))
+            try:
+                detected_source_channels, detected_matrix = self._extract_compensation_from_sample_meta(sample)
+            except Exception as exc:
+                messagebox.showerror("Compensation", f"Automatic detection failed:\n{exc}", parent=dialog)
+                return
+            header = "," + ",".join(detected_source_channels)
+            rows = [
+                f"{channel}," + ",".join(f"{value:.10g}" for value in detected_matrix[idx])
+                for idx, channel in enumerate(detected_source_channels)
+            ]
+            text_widget.delete("1.0", tk.END)
+            text_widget.insert("1.0", "\n".join([header] + rows))
+            source_channels = list(detected_source_channels)
+            mapped_channels = self._default_compensation_mapping(source_channels)
+            if any(not item for item in mapped_channels) or any(item not in self.channel_names for item in mapped_channels):
+                mapping = self._open_compensation_channel_mapping_dialog(source_channels, initial_mapping=mapped_channels, parent=dialog)
+                if mapping is None:
+                    mapped_channels = []
+                    return
+                mapped_channels = mapping
+            _refresh_preview_channel_choices()
+            _update_preview()
+
+        def _apply_editor():
+            text = text_widget.get("1.0", tk.END).strip()
+            if text:
+                try:
+                    source_channels_local, matrix = self._parse_compensation_text(text)
+                except Exception as exc:
+                    messagebox.showerror("Compensation", f"Invalid compensation matrix:\n{exc}", parent=dialog)
+                    return
+                self.compensation_source_channels = list(source_channels_local)
+                channel_mapping = mapped_channels if mapped_channels and len(mapped_channels) == len(source_channels_local) else self._default_compensation_mapping(source_channels_local)
+                if any(not item for item in channel_mapping) or len(set(channel_mapping)) != len(channel_mapping):
+                    channel_mapping = self._open_compensation_channel_mapping_dialog(source_channels_local, initial_mapping=channel_mapping, parent=dialog)
+                    if channel_mapping is None:
+                        return
+                self.compensation_channels = list(channel_mapping)
+                self.compensation_matrix = matrix
+                self.compensation_text = text
+            else:
+                self.compensation_source_channels = []
+                self.compensation_channels = []
+                self.compensation_matrix = None
+                self.compensation_text = ""
+            self.compensation_enabled.set(bool(enabled_var.get()) and self.compensation_matrix is not None)
+            self.sample_cache = {}
+            self._invalidate_computation_cache()
+            self._update_compensation_status()
+            dialog.destroy()
+            if not self.current_data.empty or self.file_map:
+                self._update_gate_summary_panel()
+                self._refresh_heatmap_options()
+                self.update_heatmap()
+                self.update_plate_overview()
+                if self._selected_labels():
+                    self.plot_population()
+
+        button_row = ttk.Frame(dialog)
+        button_row.grid(row=3, column=0, sticky="e", padx=10, pady=(0, 10))
+        ttk.Button(button_row, text="Auto Detect", command=_auto_detect).grid(row=0, column=0)
+        ttk.Button(button_row, text="Load File", command=_load_file).grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(button_row, text="Match Channels", command=_match_channels).grid(row=0, column=2, padx=(6, 0))
+        ttk.Button(button_row, text="Clear", command=lambda: text_widget.delete("1.0", tk.END)).grid(row=0, column=3, padx=(6, 0))
+        ttk.Button(button_row, text="Apply", command=_apply_editor).grid(row=0, column=4, padx=(6, 0))
+        ttk.Button(button_row, text="Close", command=dialog.destroy).grid(row=0, column=5, padx=(6, 0))
+
+        preview_sample_var.trace_add("write", _update_preview)
+        preview_x_var.trace_add("write", _update_preview)
+        preview_y_var.trace_add("write", _update_preview)
+        _refresh_preview_channel_choices()
+        _update_preview()
+
+    def _median_scatter_axis_limits(self, transformed):
+        if self.y_plot_mode_var.get() != "scatter" or _is_count_axis(self.y_var.get()):
+            return None
+        x_channel = self.x_var.get()
+        y_channel = self.y_var.get()
+        if not self.file_map:
+            return None
+        bounds = []
+        population_name = self._selected_population_name()
+        for label in self.file_map:
+            try:
+                group = self._sample_population_raw_dataframe(label, population_name)
+            except Exception:
+                continue
+            if group.empty:
+                continue
+            try:
+                transformed_group = _apply_transform(
+                    group,
+                    x_channel,
+                    y_channel,
+                    self.transform_var.get(),
+                    self.cofactor_var.get(),
+                )
+            except Exception:
+                continue
+            if x_channel not in transformed_group.columns or y_channel not in transformed_group.columns:
+                continue
+            x_values = pd.to_numeric(transformed_group[x_channel], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
+            y_values = pd.to_numeric(transformed_group[y_channel], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
+            if len(x_values) == 0 or len(y_values) == 0:
+                continue
+            bounds.append((
+                float(np.quantile(x_values, ROBUST_AXIS_LOWER_Q)),
+                float(np.quantile(x_values, ROBUST_AXIS_UPPER_Q)),
+                float(np.quantile(y_values, ROBUST_AXIS_LOWER_Q)),
+                float(np.quantile(y_values, ROBUST_AXIS_UPPER_Q)),
+            ))
+        if not bounds:
+            return None
+        medians = np.median(np.asarray(bounds, dtype=float), axis=0)
+        xmin, xmax, ymin, ymax = [float(value) for value in medians]
+        if np.isclose(xmin, xmax):
+            pad = max(abs(xmin) * 0.05, 1.0)
+            xmin -= pad
+            xmax += pad
+        else:
+            pad = (xmax - xmin) * 0.05
+            xmin -= pad
+            xmax += pad
+        if np.isclose(ymin, ymax):
+            pad = max(abs(ymin) * 0.05, 1.0)
+            ymin -= pad
+            ymax += pad
+        else:
+            pad = (ymax - ymin) * 0.05
+            ymin -= pad
+            ymax += pad
+        return xmin, xmax, ymin, ymax
+
+    def _global_scatter_axis_extent(self):
+        if self.y_plot_mode_var.get() != "scatter" or _is_count_axis(self.y_var.get()):
+            return None
+        x_channel = self.x_var.get()
+        y_channel = self.y_var.get()
+        if not self.file_map:
+            return None
+        xmin = xmax = ymin = ymax = None
+        population_name = self._selected_population_name()
+        for label in self.file_map:
+            try:
+                group = self._sample_population_raw_dataframe(label, population_name)
+            except Exception:
+                continue
+            if group.empty:
+                continue
+            try:
+                transformed_group = _apply_transform(
+                    group,
+                    x_channel,
+                    y_channel,
+                    self.transform_var.get(),
+                    self.cofactor_var.get(),
+                )
+            except Exception:
+                continue
+            if x_channel not in transformed_group.columns or y_channel not in transformed_group.columns:
+                continue
+            x_values = pd.to_numeric(transformed_group[x_channel], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
+            y_values = pd.to_numeric(transformed_group[y_channel], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
+            if len(x_values) == 0 or len(y_values) == 0:
+                continue
+            group_xmin = float(np.quantile(x_values, ROBUST_AXIS_LOWER_Q))
+            group_xmax = float(np.quantile(x_values, ROBUST_AXIS_UPPER_Q))
+            group_ymin = float(np.quantile(y_values, ROBUST_AXIS_LOWER_Q))
+            group_ymax = float(np.quantile(y_values, ROBUST_AXIS_UPPER_Q))
+            xmin = group_xmin if xmin is None else min(xmin, group_xmin)
+            xmax = group_xmax if xmax is None else max(xmax, group_xmax)
+            ymin = group_ymin if ymin is None else min(ymin, group_ymin)
+            ymax = group_ymax if ymax is None else max(ymax, group_ymax)
+        if xmin is None or xmax is None or ymin is None or ymax is None:
+            return None
+        if np.isclose(xmin, xmax):
+            pad = max(abs(xmin) * 0.05, 1.0)
+            xmin -= pad
+            xmax += pad
+        if np.isclose(ymin, ymax):
+            pad = max(abs(ymin) * 0.05, 1.0)
+            ymin -= pad
+            ymax += pad
+        return xmin, xmax, ymin, ymax
+
+    def _effective_scatter_axis_limits(self, transformed):
+        base_limits = self._median_scatter_axis_limits(transformed)
+        if base_limits is None:
+            return None
+        xmin, xmax, ymin, ymax = base_limits
+        if self.scatter_xmin_override is not None:
+            xmin = self.scatter_xmin_override
+        if self.scatter_xmax_override is not None:
+            xmax = self.scatter_xmax_override
+        if self.scatter_ymin_override is not None:
+            ymin = self.scatter_ymin_override
+        if self.scatter_ymax_override is not None:
+            ymax = self.scatter_ymax_override
+        return xmin, xmax, ymin, ymax
+
+    def open_axes_limits_dialog(self):
+        auto_limits = self._median_scatter_axis_limits(self.current_transformed)
+        slider_extent = self._global_scatter_axis_extent()
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Scatter Axes Limits")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.columnconfigure(1, weight=1)
+
+        def _fmt(value):
+            return "" if value is None else f"{value:.4g}"
+
+        current_limits = self._effective_scatter_axis_limits(self.current_transformed) or auto_limits
+        if slider_extent is None or current_limits is None:
+            ttk.Label(dialog, text="Scatter limits are unavailable until a scatter plot is loaded.", wraplength=320, justify="left").grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 10))
+            ttk.Button(dialog, text="Close", command=dialog.destroy).grid(row=1, column=1, sticky="e", padx=10, pady=(0, 10))
+            return
+
+        xmin_limit, xmax_limit, ymin_limit, ymax_limit = slider_extent
+        xmin_current, xmax_current, ymin_current, ymax_current = current_limits
+        xmin_var = tk.StringVar(value=_fmt(xmin_current))
+        xmax_var = tk.StringVar(value=_fmt(xmax_current))
+        ymin_var = tk.StringVar(value=_fmt(ymin_current))
+        ymax_var = tk.StringVar(value=_fmt(ymax_current))
+        xmin_scale = tk.DoubleVar(value=xmin_current)
+        xmax_scale = tk.DoubleVar(value=xmax_current)
+        ymin_scale = tk.DoubleVar(value=ymin_current)
+        ymax_scale = tk.DoubleVar(value=ymax_current)
+
+        def _sync_labels():
+            xmin_var.set(_fmt(xmin_scale.get()))
+            xmax_var.set(_fmt(xmax_scale.get()))
+            ymin_var.set(_fmt(ymin_scale.get()))
+            ymax_var.set(_fmt(ymax_scale.get()))
+
+        def _clamp_xmin(_value=None):
+            if xmin_scale.get() > xmax_scale.get():
+                xmax_scale.set(xmin_scale.get())
+            _sync_labels()
+
+        def _clamp_xmax(_value=None):
+            if xmax_scale.get() < xmin_scale.get():
+                xmin_scale.set(xmax_scale.get())
+            _sync_labels()
+
+        def _clamp_ymin(_value=None):
+            if ymin_scale.get() > ymax_scale.get():
+                ymax_scale.set(ymin_scale.get())
+            _sync_labels()
+
+        def _clamp_ymax(_value=None):
+            if ymax_scale.get() < ymin_scale.get():
+                ymin_scale.set(ymax_scale.get())
+            _sync_labels()
+
+        ttk.Label(dialog, text="X Min").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
+        ttk.Label(dialog, textvariable=xmin_var).grid(row=0, column=1, sticky="e", padx=10, pady=(10, 2))
+        ttk.Scale(dialog, from_=xmin_limit, to=xmax_limit, variable=xmin_scale, orient=tk.HORIZONTAL, command=_clamp_xmin).grid(row=1, column=0, columnspan=2, sticky="ew", padx=10)
+        ttk.Label(dialog, text="X Max").grid(row=2, column=0, sticky="w", padx=10, pady=(10, 2))
+        ttk.Label(dialog, textvariable=xmax_var).grid(row=2, column=1, sticky="e", padx=10, pady=(10, 2))
+        ttk.Scale(dialog, from_=xmin_limit, to=xmax_limit, variable=xmax_scale, orient=tk.HORIZONTAL, command=_clamp_xmax).grid(row=3, column=0, columnspan=2, sticky="ew", padx=10)
+        ttk.Label(dialog, text="Y Min").grid(row=4, column=0, sticky="w", padx=10, pady=(10, 2))
+        ttk.Label(dialog, textvariable=ymin_var).grid(row=4, column=1, sticky="e", padx=10, pady=(10, 2))
+        ttk.Scale(dialog, from_=ymin_limit, to=ymax_limit, variable=ymin_scale, orient=tk.HORIZONTAL, command=_clamp_ymin).grid(row=5, column=0, columnspan=2, sticky="ew", padx=10)
+        ttk.Label(dialog, text="Y Max").grid(row=6, column=0, sticky="w", padx=10, pady=(10, 2))
+        ttk.Label(dialog, textvariable=ymax_var).grid(row=6, column=1, sticky="e", padx=10, pady=(10, 2))
+        ttk.Scale(dialog, from_=ymin_limit, to=ymax_limit, variable=ymax_scale, orient=tk.HORIZONTAL, command=_clamp_ymax).grid(row=7, column=0, columnspan=2, sticky="ew", padx=10)
+
+        auto_label = "Automatic scatter limits unavailable until a scatter plot is loaded."
+        if auto_limits is not None:
+            auto_label = (
+                f"Automatic limits use the median bounds across all loaded FCS files.\n"
+                f"Auto X: {_fmt(auto_limits[0])} to {_fmt(auto_limits[1])}\n"
+                f"Auto Y: {_fmt(auto_limits[2])} to {_fmt(auto_limits[3])}"
+            )
+        extent_label = (
+            f"Slider range uses the full global extent across all loaded FCS files.\n"
+            f"Range X: {_fmt(xmin_limit)} to {_fmt(xmax_limit)}\n"
+            f"Range Y: {_fmt(ymin_limit)} to {_fmt(ymax_limit)}"
+        )
+        ttk.Label(dialog, text=auto_label, wraplength=320, justify="left").grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
+        ttk.Label(dialog, text=extent_label, wraplength=320, justify="left").grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+
+        def _apply_limits():
+            xmin = float(xmin_scale.get())
+            xmax = float(xmax_scale.get())
+            ymin = float(ymin_scale.get())
+            ymax = float(ymax_scale.get())
+            if xmin is not None and xmax is not None and xmin >= xmax:
+                messagebox.showerror("Invalid Limits", "X Min must be less than X Max.", parent=dialog)
+                return
+            if ymin is not None and ymax is not None and ymin >= ymax:
+                messagebox.showerror("Invalid Limits", "Y Min must be less than Y Max.", parent=dialog)
+                return
+            self.scatter_xmin_override = xmin
+            self.scatter_xmax_override = xmax
+            self.scatter_ymin_override = ymin
+            self.scatter_ymax_override = ymax
+            dialog.destroy()
+            if not self.current_transformed.empty:
+                self.redraw()
+
+        def _reset_auto():
+            self.scatter_xmin_override = None
+            self.scatter_xmax_override = None
+            self.scatter_ymin_override = None
+            self.scatter_ymax_override = None
+            dialog.destroy()
+            if not self.current_transformed.empty:
+                self.redraw()
+
+        button_row = ttk.Frame(dialog)
+        button_row.grid(row=10, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
+        ttk.Button(button_row, text="Use Auto", command=_reset_auto).grid(row=0, column=0)
+        ttk.Button(button_row, text="Apply", command=_apply_limits).grid(row=0, column=1, padx=(6, 0))
+        ttk.Button(button_row, text="Close", command=dialog.destroy).grid(row=0, column=2, padx=(6, 0))
+
     def _latest_release_info(self):
         request = urllib.request.Request(
             GITHUB_LATEST_RELEASE_API,
@@ -1313,6 +1973,7 @@ open "$TARGET_APP"
             "gates": self.gates,
             "plate_metadata": self.plate_metadata,
             "dose_curve_definitions": self.dose_curve_definitions,
+            "compensation": self._compensation_payload(),
         }
 
     def _gate_template_payload(self):
@@ -1462,6 +2123,7 @@ open "$TARGET_APP"
         self.gates = payload.get("gates", [])
         self.plate_metadata = payload.get("plate_metadata", {})
         self.dose_curve_definitions = payload.get("dose_curve_definitions", {})
+        self._load_compensation_payload(payload.get("compensation", {}))
         self._invalidate_computation_cache()
         self._refresh_gate_lists()
         self._update_gate_summary_panel()
@@ -1522,6 +2184,7 @@ open "$TARGET_APP"
         self.gates = []
         self.plate_metadata = {}
         self.dose_curve_definitions = {}
+        self._load_compensation_payload({})
         self.saved_gate_labels = {}
         self.pending_gate = None
         self._invalidate_computation_cache()
@@ -1611,7 +2274,7 @@ open "$TARGET_APP"
     def _sample_raw_dataframe(self, label):
         relpath = self.file_map[label]
         sample = self._load_sample(relpath)
-        df = sample.data.copy()
+        df = self._apply_compensation(sample.data.copy())
         well = _get_well_name(relpath, self.instrument_var.get())
         df["__well__"] = well
         df["__source__"] = relpath
@@ -1640,7 +2303,7 @@ open "$TARGET_APP"
         for idx, label in enumerate(labels):
             relpath = self.file_map[label]
             sample = self._load_sample(relpath)
-            df = sample.data.copy()
+            df = self._apply_compensation(sample.data.copy())
             df["__well__"] = _get_well_name(relpath, self.instrument_var.get())
             df["__source__"] = relpath
             df["__sample_idx__"] = idx
@@ -2099,6 +2762,11 @@ open "$TARGET_APP"
 
         population_name = self._selected_population_name()
         title_name = self._population_display_label(population_name)
+        if not histogram_mode:
+            scatter_limits = self._effective_scatter_axis_limits(transformed)
+            if scatter_limits is not None:
+                self.ax.set_xlim(scatter_limits[0], scatter_limits[1])
+                self.ax.set_ylim(scatter_limits[2], scatter_limits[3])
         self.ax.set_xlabel(f"{self.x_var.get()} ({self.transform_var.get()})")
         self.ax.set_ylabel("Count" if histogram_mode else f"{self.y_var.get()} ({self.transform_var.get()})")
         self.ax.set_title(f"{title_name} | {len(raw_df)} events")

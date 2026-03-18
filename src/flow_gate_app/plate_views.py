@@ -21,10 +21,11 @@ def open_plate_map_editor(self):
     selected_wells = set()
     available_wells = {_get_well_name(relpath, self.instrument_var.get()) for relpath in self.file_map.values()}
     sample_name_var = tk.StringVar()
+    sample_type_var = tk.StringVar(value="sample")
     direction_var = tk.StringVar(value="horizontal")
-    curve_points_var = tk.IntVar(value=8)
-    top_dose_var = tk.DoubleVar(value=1.0)
-    dilution_var = tk.DoubleVar(value=3.0)
+    curve_points_var = tk.IntVar(value=4)
+    top_dose_var = tk.DoubleVar(value=50.0)
+    dilution_var = tk.DoubleVar(value=2.0)
     info_var = tk.StringVar(value="Click or drag across wells to select them. Hold Shift or Control to add discontinuous groups.")
     drag_rect = {"id": None, "start": None}
     well_items = {}
@@ -139,6 +140,7 @@ def open_plate_map_editor(self):
                     "Well Assignment",
                     f"Well {well}\n"
                     f"Sample: {meta.get('sample_name', '')}\n"
+                    f"Sample type: {meta.get('sample_type', '')}\n"
                     f"Dose curve: {meta.get('dose_curve', '')}\n"
                     f"Dose: {meta.get('dose', '')}\n"
                     f"Replicate: {meta.get('replicate', '')}\n"
@@ -156,9 +158,11 @@ def open_plate_map_editor(self):
             info_var.set("No wells selected.")
             return
         self._push_undo_state()
+        sample_type = sample_type_var.get().strip()
         for well in sorted_selected_wells():
             self.plate_metadata.setdefault(well, {})
             self.plate_metadata[well]["sample_name"] = sample_name_var.get().strip()
+            self.plate_metadata[well]["sample_type"] = sample_type
         refresh_plate()
         info_var.set(f"Applied metadata to {len(selected_wells)} wells.")
         self._mark_state_changed(f"Updated sample names for {len(selected_wells)} wells.")
@@ -169,6 +173,7 @@ def open_plate_map_editor(self):
             info_var.set("No wells selected.")
             return
         sample_name = sample_name_var.get().strip()
+        sample_type = sample_type_var.get().strip()
         if not sample_name:
             info_var.set("Enter a sample name first.")
             return
@@ -206,6 +211,7 @@ def open_plate_map_editor(self):
                 dose_value = top_dose / (dilution ** point_idx)
                 self.plate_metadata.setdefault(well, {})
                 self.plate_metadata[well]["sample_name"] = sample_name
+                self.plate_metadata[well]["sample_type"] = sample_type
                 self.plate_metadata[well]["dose_curve"] = curve_name
                 self.plate_metadata[well]["dose"] = dose_value
                 self.plate_metadata[well]["replicate"] = replicate_idx
@@ -295,11 +301,14 @@ def open_plate_map_editor(self):
     canvas.bind("<ButtonRelease-1>", on_canvas_release)
     refresh_plate()
 
-    basic = ttk.LabelFrame(control, text="Sample Assignment", padding=10)
+    basic = ttk.LabelFrame(control, text="Sample And Control Assignment", padding=10)
     basic.grid(row=0, column=0, sticky="ew", pady=(0, 10))
     ttk.Label(basic, text="Sample Name").grid(row=0, column=0, sticky="w")
     ttk.Entry(basic, textvariable=sample_name_var, width=24).grid(row=1, column=0, padx=4)
-    ttk.Button(basic, text="Apply Sample Name", command=apply_metadata).grid(row=1, column=1, padx=6)
+    ttk.Label(basic, text="Sample Type / Control Role").grid(row=0, column=1, sticky="w")
+    ttk.Combobox(basic, textvariable=sample_type_var, values=["sample", "negative_control", "positive_control", ""], state="readonly", width=18).grid(row=1, column=1, padx=4)
+    ttk.Button(basic, text="Apply Sample Name", command=apply_metadata).grid(row=1, column=2, padx=6)
+    ttk.Label(basic, text="Use `negative_control` or `positive_control` here for normalization in Analysis Preview.", wraplength=420).grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=(8, 0))
 
     dose_frame = ttk.LabelFrame(control, text="Dose Curve Parameters", padding=10)
     dose_frame.grid(row=1, column=0, sticky="ew")
