@@ -116,10 +116,16 @@ def transform_array(values, method, cofactor):
     raise ValueError(f"Unsupported transform: {method}")
 
 
-def apply_transform(df, x_channel, y_channel, method, cofactor):
+def apply_transform(df, x_channel, y_channel, method, cofactor, y_method=None, y_cofactor=None):
+    x_method = method
+    x_cofactor = cofactor
+    if y_method is None:
+        y_method = x_method
+    if y_cofactor is None:
+        y_cofactor = x_cofactor
     transformed = pd.DataFrame(index=df.index.copy())
-    transformed[x_channel] = transform_array(df[x_channel].to_numpy(), method, cofactor)
-    transformed[y_channel] = transform_array(df[y_channel].to_numpy(), method, cofactor)
+    transformed[x_channel] = transform_array(df[x_channel].to_numpy(), x_method, x_cofactor)
+    transformed[y_channel] = transform_array(df[y_channel].to_numpy(), y_method, y_cofactor)
     return transformed
 
 
@@ -150,7 +156,7 @@ def gate_mask(transformed_df, gate_spec):
     x_channel = gate_spec["x_channel"]
     x_values = transformed_df[x_channel].to_numpy()
 
-    if gate_type == "polygon":
+    if gate_type in {"polygon", "rectangle"}:
         y_channel = gate_spec["y_channel"]
         points = transformed_df[[x_channel, y_channel]].to_numpy()
         return Path(gate_spec["vertices"]).contains_points(points)
@@ -195,7 +201,7 @@ def gate_mask(transformed_df, gate_spec):
 def render_gate(ax, gate_spec, selected=False):
     color = gate_spec.get("color", "crimson")
     linewidth = 2.5 if selected else 1.8
-    if gate_spec["gate_type"] == "polygon":
+    if gate_spec["gate_type"] in {"polygon", "rectangle"}:
         vertices = np.asarray(gate_spec["vertices"])
         closed = np.vstack([vertices, vertices[0]])
         ax.plot(closed[:, 0], closed[:, 1], color=color, linewidth=linewidth)
@@ -216,7 +222,7 @@ def build_flow_gate(gate_spec):
     PolyGate = tools["PolyGate"]
     QuadGate = tools["QuadGate"]
     ThresholdGate = tools["ThresholdGate"]
-    if gate_spec["gate_type"] == "polygon":
+    if gate_spec["gate_type"] in {"polygon", "rectangle"}:
         return PolyGate(
             gate_spec["vertices"],
             channels=(gate_spec["x_channel"], gate_spec["y_channel"]),

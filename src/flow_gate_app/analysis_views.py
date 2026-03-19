@@ -104,7 +104,7 @@ def open_analysis_preview(self):
     default_pct = pct_cols[0] if pct_cols else ""
     pct_col_var = tk.StringVar(value=default_pct)
     x_axis_var = tk.StringVar(value="sample_name" if "sample_name" in summary.columns else "well")
-    hue_var = tk.StringVar(value="replicate" if "replicate" in summary.columns else "")
+    hue_var = tk.StringVar(value="sample_name" if "sample_name" in summary.columns else ("replicate" if "replicate" in summary.columns else ""))
 
     metadata_cols = {"well", "source", "sample_name", "treatment_group", "dose_curve", "dose", "replicate", "sample_type", "dose_direction", "excluded"}
     bool_cols = [c for c in intensity.columns if c.startswith("in_")]
@@ -152,7 +152,7 @@ def open_analysis_preview(self):
 
     plot_type_label = ttk.Label(controls, text="Plot Type")
     plot_type_label.grid(row=0, column=0, sticky="w")
-    plot_type_combo = ttk.Combobox(controls, textvariable=plot_mode_var, values=["bar", "distribution", "correlation"], state="readonly", width=14)
+    plot_type_combo = ttk.Combobox(controls, textvariable=plot_mode_var, values=["bar", "line", "distribution", "correlation"], state="readonly", width=14)
     plot_type_combo.grid(row=1, column=0, padx=4)
     pct_col_label = ttk.Label(controls, text="% Positive Column")
     pct_col_label.grid(row=0, column=1, sticky="w")
@@ -456,7 +456,12 @@ def open_analysis_preview(self):
         shared_channel_widgets = [channel_label, channel_combo]
         distribution_only_widgets = [gate_filter_label, gate_filter_combo, hue_dist_label, hue_dist_combo]
         correlation_widgets = [corr_y_label, corr_y_combo]
-        if mode == "bar":
+        if mode == "line":
+            if "dose" in summary.columns:
+                x_axis_var.set("dose")
+            if "sample_name" in summary.columns:
+                hue_var.set("sample_name")
+        if mode in {"bar", "line"}:
             for widget in bar_widgets:
                 widget.grid()
             for widget in shared_channel_widgets + distribution_only_widgets + correlation_widgets:
@@ -542,17 +547,47 @@ def open_analysis_preview(self):
     def redraw_preview(*_args):
         ax.clear()
         mode = plot_mode_var.get()
-        if mode == "bar":
+        if mode in {"bar", "line"}:
             if not pct_col_var.get() or pct_col_var.get() not in summary.columns:
                 ax.set_title("No % positive column selected")
                 canvas.draw_idle()
                 return
             plot_df = summary.copy()
+            if "sample_name" in plot_df.columns:
+                plot_df["sample_name"] = plot_df["sample_name"].astype(str).str.strip()
+                plot_df = plot_df[plot_df["sample_name"] != ""].copy()
             xcol = x_axis_var.get() if x_axis_var.get() in plot_df.columns else "well"
             huecol = hue_var.get() if hue_var.get() in plot_df.columns and hue_var.get() else None
             plot_df, ycol, y_label, normalization_title = _normalized_bar_dataframe(plot_df, pct_col_var.get(), xcol)
             if plot_df.empty:
                 ax.set_title(normalization_title or "No bar data available")
+                canvas.draw_idle()
+                return
+            if mode == "line":
+                if xcol == "dose":
+                    plot_df[xcol] = pd.to_numeric(plot_df[xcol], errors="coerce")
+                    plot_df = plot_df.dropna(subset=[xcol]).sort_values([huecol or "sample_name", xcol] if (huecol or "sample_name") in plot_df.columns else [xcol])
+                line_hue = huecol or ("sample_name" if "sample_name" in plot_df.columns else None)
+                line_palette = _palette_for_hue("sample_name") if line_hue == "sample_name" else None
+                _sns().lineplot(
+                    data=plot_df,
+                    x=xcol,
+                    y=ycol,
+                    hue=line_hue,
+                    markers=True,
+                    dashes=False,
+                    linewidth=2.2,
+                    palette=line_palette,
+                    estimator="mean",
+                    errorbar="sd",
+                    err_style="bars",
+                    sort=True,
+                    ax=ax,
+                )
+                default_title = normalization_title or (pct_col_var.get().replace("pct_", "") if pct_col_var.get() else "Percent Positive")
+                _apply_plot_formatting(default_title=default_title, default_xlabel=xcol, default_ylabel=y_label)
+                ax.tick_params(axis="x", rotation=45)
+                fig.tight_layout()
                 canvas.draw_idle()
                 return
             if huecol == "sample_name":
@@ -576,6 +611,9 @@ def open_analysis_preview(self):
             canvas.draw_idle()
             return
         plot_df = intensity.copy()
+        if "sample_name" in plot_df.columns:
+            plot_df["sample_name"] = plot_df["sample_name"].astype(str).str.strip()
+            plot_df = plot_df[plot_df["sample_name"] != ""].copy()
         if gate_filter_var.get() and gate_filter_var.get() in plot_df.columns:
             plot_df = plot_df[plot_df[gate_filter_var.get()].astype(bool)]
         huecol = hue_dist_var.get() if hue_dist_var.get() in plot_df.columns else None

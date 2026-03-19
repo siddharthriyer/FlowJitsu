@@ -22,6 +22,8 @@ def open_plate_map_editor(self):
     available_wells = {_get_well_name(relpath, self.instrument_var.get()) for relpath in self.file_map.values()}
     sample_name_var = tk.StringVar()
     sample_type_var = tk.StringVar(value="sample")
+    selected_sample_var = tk.StringVar(value="")
+    assignment_mode_var = tk.StringVar(value="sample")
     direction_var = tk.StringVar(value="horizontal")
     curve_points_var = tk.IntVar(value=4)
     top_dose_var = tk.DoubleVar(value=50.0)
@@ -58,13 +60,16 @@ def open_plate_map_editor(self):
     scroll_canvas.bind_all("<MouseWheel>", _wheel)
 
     def default_well_fill(well):
+        active_sample = selected_sample_var.get().strip()
+        meta = self.plate_metadata.get(well, {})
+        sample_name = str(meta.get("sample_name", "")).strip()
+        if active_sample and sample_name == active_sample:
+            return "#ffd166" if well not in selected_wells else "#f6bd60"
         if well in selected_wells:
             return "#8dd3c7"
         if well in available_wells:
-            meta = self.plate_metadata.get(well, {})
             if meta.get("excluded", False):
                 return "#d9d9d9"
-            sample_name = meta.get("sample_name", "")
             if sample_name:
                 palette = ["#cfe8ff", "#ffe0c7", "#d9f2d9", "#ecd9ff", "#ffeaa7", "#ffd6e7"]
                 return palette[abs(hash(sample_name)) % len(palette)]
@@ -81,6 +86,31 @@ def open_plate_map_editor(self):
     def set_info():
         ordered = sorted(selected_wells, key=lambda w: (w[0], int(w[1:])))
         info_var.set(f"Selected wells ({len(ordered)}): {', '.join(ordered) if ordered else 'none'}")
+
+    def sample_names_in_use():
+        return sorted({
+            str(meta.get("sample_name", "")).strip()
+            for meta in self.plate_metadata.values()
+            if str(meta.get("sample_name", "")).strip()
+        })
+
+    sample_listbox = None
+
+    def refresh_sample_panel():
+        if sample_listbox is None:
+            return
+        names = sample_names_in_use()
+        current = selected_sample_var.get().strip()
+        sample_listbox.delete(0, tk.END)
+        for name in names:
+            sample_listbox.insert(tk.END, name)
+        if current in names:
+            idx = names.index(current)
+            sample_listbox.selection_set(idx)
+            sample_listbox.see(idx)
+        elif current:
+            selected_sample_var.set("")
+        refresh_plate()
 
     def toggle_well(well):
         if well in selected_wells:
@@ -164,8 +194,135 @@ def open_plate_map_editor(self):
             self.plate_metadata[well]["sample_name"] = sample_name_var.get().strip()
             self.plate_metadata[well]["sample_type"] = sample_type
         refresh_plate()
+        refresh_sample_panel()
         info_var.set(f"Applied metadata to {len(selected_wells)} wells.")
         self._mark_state_changed(f"Updated sample names for {len(selected_wells)} wells.")
+
+    def rebuild_dose_curve_definitions():
+        rebuilt = {}
+        grouped = {}
+        for well, meta in self.plate_metadata.items():
+            sample_name = str(meta.get("sample_name", "")).strip()
+            curve_name = str(meta.get("dose_curve", "")).strip()
+            if not sample_name or not curve_name:
+                continue
+            grouped.setdefault(curve_name, []).append((well, meta))
+        for curve_name, items in grouped.items():
+            wells = sorted([well for well, _meta in items], key=lambda w: (w[0], int(w[1:])))
+            first_meta = items[0][1]
+            doses = []
+            for _well, meta in items:
+                dose = meta.get("dose", "")
+                try:
+                    doses.append(float(dose))
+                except Exception:
+                    continue
+            top_dose = max(doses) if doses else ""
+            dilution = ""
+            if len(doses) >= 2:
+                ordered = sorted([dose for dose in doses if dose > 0], reverse=True)
+                if len(ordered) >= 2 and ordered[1] > 0:
+                    dilution = ordered[0] / ordered[1]
+            rebuilt[curve_name] = {
+                "sample_name": str(first_meta.get("sample_name", "")).strip(),
+                "direction": first_meta.get("dose_direction", ""),
+                "points": len(wells),
+                "top_dose": top_dose,
+                "dilution": dilution,
+                "wells": wells,
+            }
+        self.dose_curve_definitions = rebuilt
+
+    def delete_sample_assignment():
+        wells = sorted_selected_wells()
+        if not wells:
+            info_var.set("No wells selected.")
+            return
+        self._push_undo_state()
+        fields_to_clear = ["sample_name", "sample_type", "dose_curve", "dose", "replicate", "dose_direction"]
+        for well in wells:
+            meta = self.plate_metadata.setdefault(well, {})
+            for field in fields_to_clear:
+                meta.pop(field, None)
+        rebuild_dose_curve_definitions()
+        refresh_plate()
+        refresh_sample_panel()
+        refresh_curve_panel()
+        info_var.set(f"Cleared sample assignment for {len(wells)} wells.")
+        self._mark_state_changed(f"Cleared sample assignment for {len(wells)} wells.")
+
+    def wells_for_sample(sample_name):
+        return sorted(
+            [
+                well for well, meta in self.plate_metadata.items()
+                if str(meta.get("sample_name", "")).strip() == sample_name
+            ],
+            key=lambda w: (w[0], int(w[1:])),
+        )
+
+    def on_sample_select(_event=None):
+        if sample_listbox is None:
+            return
+        selection = sample_listbox.curselection()
+        if not selection:
+            selected_sample_var.set("")
+            refresh_plate()
+            return
+        sample_name = sample_listbox.get(selection[0])
+        selected_sample_var.set(sample_name)
+        wells = wells_for_sample(sample_name)
+        if wells:
+            first_meta = self.plate_metadata.get(wells[0], {})
+            sample_name_var.set(sample_name)
+            sample_type_var.set(str(first_meta.get("sample_type", "sample")).strip() or "sample")
+        refresh_plate()
+        info_var.set(f"Selected sample '{sample_name}' across {len(wells)} wells.")
+
+    def extend_selected_sample():
+        sample_name = selected_sample_var.get().strip()
+        if not sample_name:
+            info_var.set("Select a sample first.")
+            return
+        wells = sorted_selected_wells()
+        if not wells:
+            info_var.set("Select wells to extend the sample into.")
+            return
+        source_wells = wells_for_sample(sample_name)
+        source_meta = self.plate_metadata.get(source_wells[0], {}) if source_wells else {}
+        self._push_undo_state()
+        for well in wells:
+            self.plate_metadata.setdefault(well, {})
+            self.plate_metadata[well]["sample_name"] = sample_name
+            self.plate_metadata[well]["sample_type"] = str(source_meta.get("sample_type", sample_type_var.get().strip() or "sample")).strip()
+        rebuild_dose_curve_definitions()
+        refresh_plate()
+        refresh_sample_panel()
+        refresh_curve_panel()
+        info_var.set(f"Extended sample '{sample_name}' into {len(wells)} selected wells.")
+        self._mark_state_changed(f"Extended sample '{sample_name}' into {len(wells)} wells.")
+
+    def delete_selected_sample():
+        sample_name = selected_sample_var.get().strip()
+        if not sample_name:
+            info_var.set("Select a sample first.")
+            return
+        wells = wells_for_sample(sample_name)
+        if not wells:
+            info_var.set(f"No wells found for sample '{sample_name}'.")
+            return
+        self._push_undo_state()
+        fields_to_clear = ["sample_name", "sample_type", "dose_curve", "dose", "replicate", "dose_direction"]
+        for well in wells:
+            meta = self.plate_metadata.setdefault(well, {})
+            for field in fields_to_clear:
+                meta.pop(field, None)
+        selected_sample_var.set("")
+        rebuild_dose_curve_definitions()
+        refresh_plate()
+        refresh_sample_panel()
+        refresh_curve_panel()
+        info_var.set(f"Deleted sample assignment '{sample_name}' from {len(wells)} wells.")
+        self._mark_state_changed(f"Deleted sample '{sample_name}' from {len(wells)} wells.")
 
     def apply_dose_curve():
         wells = sorted_selected_wells()
@@ -229,6 +386,13 @@ def open_plate_map_editor(self):
         info_var.set(f"Assigned sample '{sample_name}' to {len(wells)} wells with {direction} dose progression.")
         self._mark_state_changed(f"Updated dose curve metadata for {sample_name}.")
 
+    def apply_assignment():
+        mode = assignment_mode_var.get().strip().lower()
+        if mode == "dose_curve":
+            apply_dose_curve()
+        else:
+            apply_metadata()
+
     def export_metadata():
         if not self.plate_metadata:
             messagebox.showinfo("Plate Map", "No metadata to export.")
@@ -275,6 +439,8 @@ def open_plate_map_editor(self):
     canvas.grid(row=0, column=0, padx=0, pady=(0, 10), sticky="ew")
     control = ttk.Frame(content, padding=10)
     control.grid(row=1, column=0, sticky="ew")
+    control.columnconfigure(0, weight=1)
+    control.columnconfigure(1, weight=1)
 
     margin_x = 70
     margin_y = 55
@@ -301,33 +467,64 @@ def open_plate_map_editor(self):
     canvas.bind("<ButtonRelease-1>", on_canvas_release)
     refresh_plate()
 
+    def _update_assignment_mode():
+        mode = assignment_mode_var.get().strip().lower()
+        if mode == "dose_curve":
+            dose_frame.grid()
+            apply_button.configure(text="Apply Sample And Dose Curve")
+        else:
+            dose_frame.grid_remove()
+            apply_button.configure(text="Apply Sample")
+
     basic = ttk.LabelFrame(control, text="Sample And Control Assignment", padding=10)
-    basic.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-    ttk.Label(basic, text="Sample Name").grid(row=0, column=0, sticky="w")
-    ttk.Entry(basic, textvariable=sample_name_var, width=24).grid(row=1, column=0, padx=4)
-    ttk.Label(basic, text="Sample Type / Control Role").grid(row=0, column=1, sticky="w")
-    ttk.Combobox(basic, textvariable=sample_type_var, values=["sample", "negative_control", "positive_control", ""], state="readonly", width=18).grid(row=1, column=1, padx=4)
-    ttk.Button(basic, text="Apply Sample Name", command=apply_metadata).grid(row=1, column=2, padx=6)
-    ttk.Label(basic, text="Use `negative_control` or `positive_control` here for normalization in Analysis Preview.", wraplength=420).grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=(8, 0))
+    basic.grid(row=0, column=0, sticky="nsew", pady=(0, 10), padx=(0, 8))
+    for idx in range(5):
+        basic.columnconfigure(idx, weight=1 if idx < 3 else 0)
+    ttk.Label(basic, text="Assignment Type").grid(row=0, column=0, sticky="w")
+    ttk.Combobox(basic, textvariable=assignment_mode_var, values=["sample", "dose_curve"], state="readonly", width=16).grid(row=1, column=0, padx=4, sticky="ew")
+    ttk.Label(basic, text="Sample Name").grid(row=0, column=1, sticky="w")
+    ttk.Entry(basic, textvariable=sample_name_var, width=24).grid(row=1, column=1, padx=4, sticky="ew")
+    ttk.Label(basic, text="Sample Type / Control Role").grid(row=0, column=2, sticky="w")
+    ttk.Combobox(basic, textvariable=sample_type_var, values=["sample", "negative_control", "positive_control", ""], state="readonly", width=18).grid(row=1, column=2, padx=4, sticky="ew")
+    apply_button = ttk.Button(basic, text="Apply Sample", command=apply_assignment)
+    apply_button.grid(row=1, column=3, padx=6)
+    ttk.Button(basic, text="Delete Wells", command=delete_sample_assignment).grid(row=1, column=4, padx=6)
+    ttk.Label(basic, text="Use `negative_control` or `positive_control` here for normalization in Analysis Preview.", wraplength=520).grid(row=2, column=0, columnspan=5, sticky="w", padx=4, pady=(8, 0))
+
+    sample_panel = ttk.LabelFrame(control, text="Sample Manager", padding=10)
+    sample_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+    sample_panel.columnconfigure(0, weight=1)
+    ttk.Label(sample_panel, text="Samples").grid(row=0, column=0, sticky="w")
+    sample_listbox = tk.Listbox(sample_panel, height=8, exportselection=False)
+    sample_listbox.grid(row=1, column=0, sticky="ew")
+    sample_listbox.bind("<<ListboxSelect>>", on_sample_select)
+    ttk.Button(sample_panel, text="Extend To Selection", command=extend_selected_sample).grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    ttk.Button(sample_panel, text="Delete Sample", command=delete_selected_sample).grid(row=3, column=0, sticky="ew", pady=(6, 0))
+    ttk.Label(sample_panel, text="Selecting a sample highlights all of its wells on the plate.", wraplength=320).grid(row=4, column=0, sticky="w", pady=(8, 0))
 
     dose_frame = ttk.LabelFrame(control, text="Dose Curve Parameters", padding=10)
-    dose_frame.grid(row=1, column=0, sticky="ew")
+    dose_frame.grid(row=0, column=1, sticky="nsew", pady=(0, 10), padx=(8, 0))
+    for idx in range(4):
+        dose_frame.columnconfigure(idx, weight=1)
     ttk.Label(dose_frame, text="Direction").grid(row=0, column=0, sticky="w")
-    ttk.Combobox(dose_frame, textvariable=direction_var, values=["horizontal", "vertical"], state="readonly", width=12).grid(row=1, column=0, padx=4)
+    ttk.Combobox(dose_frame, textvariable=direction_var, values=["horizontal", "vertical"], state="readonly", width=12).grid(row=1, column=0, padx=4, sticky="ew")
     ttk.Label(dose_frame, text="Number of Points").grid(row=0, column=1, sticky="w")
-    ttk.Spinbox(dose_frame, from_=1, to=24, textvariable=curve_points_var, width=10).grid(row=1, column=1, padx=4)
+    ttk.Spinbox(dose_frame, from_=1, to=24, textvariable=curve_points_var, width=10).grid(row=1, column=1, padx=4, sticky="ew")
     ttk.Label(dose_frame, text="Top Dose").grid(row=0, column=2, sticky="w")
-    ttk.Entry(dose_frame, textvariable=top_dose_var, width=12).grid(row=1, column=2, padx=4)
+    ttk.Entry(dose_frame, textvariable=top_dose_var, width=12).grid(row=1, column=2, padx=4, sticky="ew")
     ttk.Label(dose_frame, text="Dilution Per Step").grid(row=0, column=3, sticky="w")
-    ttk.Entry(dose_frame, textvariable=dilution_var, width=12).grid(row=1, column=3, padx=4)
-    ttk.Button(dose_frame, text="Apply Dose Curve", command=apply_dose_curve).grid(row=1, column=4, padx=8)
-    ttk.Button(dose_frame, text="Export Plate CSV", command=export_metadata).grid(row=1, column=5, padx=8)
+    ttk.Entry(dose_frame, textvariable=dilution_var, width=12).grid(row=1, column=3, padx=4, sticky="ew")
+    ttk.Button(dose_frame, text="Export Plate CSV", command=export_metadata).grid(row=2, column=2, columnspan=2, padx=4, pady=(10, 0), sticky="ew")
+    ttk.Label(dose_frame, text="This section only applies when Assignment Type is set to dose_curve.", wraplength=380).grid(row=3, column=0, columnspan=4, sticky="w", padx=4, pady=(8, 0))
 
     curve_frame = ttk.LabelFrame(content, text="Current Dose Curves", padding=10)
     curve_frame.grid(row=2, column=0, sticky="ew")
     curve_text = tk.Text(curve_frame, width=90, height=10, wrap="word")
     curve_text.grid(row=0, column=0, sticky="ew")
     curve_text.configure(state="disabled")
+    assignment_mode_var.trace_add("write", lambda *_: _update_assignment_mode())
+    _update_assignment_mode()
+    refresh_sample_panel()
     refresh_curve_panel()
 
     ttk.Label(content, textvariable=info_var, wraplength=900).grid(row=3, column=0, sticky="w", pady=(10, 10))

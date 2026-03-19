@@ -22,6 +22,12 @@ from matplotlib.widgets import PolygonSelector
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except Exception:
+    DND_FILES = None
+    TkinterDnD = None
+
 from ._app_version import __version__
 from .analysis_views import (
     analysis_bundle_paths as _analysis_bundle_paths_impl,
@@ -105,7 +111,7 @@ class FlowDesktopApp:
     def __init__(self, base_dir=None, instrument="Cytoflex", max_points=15000):
         self.base_dir = base_dir or os.getcwd()
         self.max_points_default = int(max_points)
-        self.root = tk.Tk()
+        self.root = TkinterDnD.Tk() if TkinterDnD is not None else tk.Tk()
         self.root.title(f"{APP_BRAND} v{__version__}")
         self.root.geometry("1440x840")
 
@@ -117,9 +123,12 @@ class FlowDesktopApp:
         self.population_var = tk.StringVar(value="__all__")
         self.x_var = tk.StringVar()
         self.y_var = tk.StringVar()
-        self.transform_var = tk.StringVar(value="arcsinh")
-        self.cofactor_var = tk.DoubleVar(value=150.0)
+        self.x_transform_var = tk.StringVar(value="arcsinh")
+        self.x_cofactor_var = tk.DoubleVar(value=150.0)
+        self.y_transform_var = tk.StringVar(value="arcsinh")
+        self.y_cofactor_var = tk.DoubleVar(value=150.0)
         self.max_points_var = tk.IntVar(value=self.max_points_default)
+        self.hist_bins_var = tk.IntVar(value=100)
         self.y_plot_mode_var = tk.StringVar(value="scatter")
         self.compensation_enabled = tk.BooleanVar(value=False)
         self.compensation_source_channels = []
@@ -146,6 +155,7 @@ class FlowDesktopApp:
         self.heatmap_channel_y_var = tk.StringVar(value="")
         self.heatmap_title_var = tk.StringVar(value="")
         self.recent_session_var = tk.StringVar(value="")
+        self.drop_status_var = tk.StringVar(value="")
 
         self.file_map = {}
         self.sample_cache = {}
@@ -167,6 +177,7 @@ class FlowDesktopApp:
         self.plate_tooltip_label = None
         self.plate_hovered_well = None
         self.pending_gate = None
+        self.rectangle_start_point = None
         self.selector = None
         self.canvas_click_cid = None
         self.drag_cid = None
@@ -321,18 +332,32 @@ class FlowDesktopApp:
         self._accent_button(data_frame, "Load Folder", self.load_folder, bg="#4869d6", fg="#1d1d1f", row=2, column=2, sticky="ew")
         self._secondary_button(data_frame, "Set Home", self.set_home_folder, row=3, column=0, sticky="ew", pady=(6, 0))
         ttk.Label(data_frame, textvariable=self._home_folder_label_textvar(), wraplength=470).grid(row=3, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(8, 0))
-        ttk.Label(data_frame, text="Wells").grid(row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.drop_target_label = tk.Label(
+            data_frame,
+            text="Drop folders, sessions, or gate templates here",
+            bg="#e8eefc" if DND_FILES is not None else "#eff1f5",
+            fg="#1d1d1f",
+            relief="groove",
+            borderwidth=1,
+            padx=10,
+            pady=10,
+            anchor="center",
+        )
+        self.drop_target_label.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        ttk.Label(data_frame, textvariable=self.drop_status_var, wraplength=470).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        ttk.Label(data_frame, text="Wells").grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.well_listbox = tk.Listbox(data_frame, selectmode=tk.EXTENDED, width=48, height=12, exportselection=False)
-        self.well_listbox.grid(row=5, column=0, columnspan=3, sticky="ew")
-        self._secondary_button(data_frame, "Compensation", self.open_compensation_editor, row=6, column=0, sticky="ew", pady=(8, 0))
+        self.well_listbox.grid(row=7, column=0, columnspan=3, sticky="ew")
+        self._secondary_button(data_frame, "Compensation", self.open_compensation_editor, row=8, column=0, sticky="ew", pady=(8, 0))
         self.compensation_status_var = tk.StringVar(value="Compensation: off")
-        ttk.Label(data_frame, textvariable=self.compensation_status_var, wraplength=470).grid(row=6, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(10, 0))
+        ttk.Label(data_frame, textvariable=self.compensation_status_var, wraplength=470).grid(row=8, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(10, 0))
 
         plot_frame = section(left, "Plot")
-        config_grid(plot_frame, 3)
+        config_grid(plot_frame, 4)
         ttk.Label(plot_frame, text="Population").grid(row=0, column=0, sticky="w")
         ttk.Label(plot_frame, text="Max Points").grid(row=0, column=1, sticky="w")
         ttk.Label(plot_frame, text="").grid(row=0, column=2, sticky="w")
+        ttk.Label(plot_frame, text="").grid(row=0, column=3, sticky="w")
         self.population_combo = ttk.Combobox(plot_frame, textvariable=self.population_var, state="readonly", width=22)
         self.population_combo.grid(row=1, column=0, sticky="ew")
         ttk.Spinbox(plot_frame, from_=1000, to=50000, increment=1000, textvariable=self.max_points_var, width=10).grid(row=1, column=1, sticky="ew", padx=4)
@@ -345,18 +370,22 @@ class FlowDesktopApp:
         self.y_combo = ttk.Combobox(plot_frame, textvariable=self.y_var, state="readonly", width=20)
         self.y_combo.grid(row=3, column=1, sticky="ew", padx=4)
         ttk.Combobox(plot_frame, textvariable=self.y_plot_mode_var, values=["scatter", "count histogram"], state="readonly", width=16).grid(row=3, column=2, sticky="ew")
-        ttk.Label(plot_frame, text="Transform").grid(row=4, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(plot_frame, text="Cofactor").grid(row=4, column=1, sticky="w", pady=(10, 0))
-        ttk.Combobox(plot_frame, textvariable=self.transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=5, column=0, sticky="ew")
-        ttk.Spinbox(plot_frame, from_=1.0, to=10000.0, increment=10.0, textvariable=self.cofactor_var, width=12).grid(row=5, column=1, sticky="ew", padx=4)
-        self._secondary_button(plot_frame, "Axes Limits", self.open_axes_limits_dialog, row=5, column=2, sticky="ew")
+        ttk.Label(plot_frame, text="X Transform").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(plot_frame, text="X Cofactor").grid(row=4, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(plot_frame, text="Y Transform").grid(row=4, column=2, sticky="w", pady=(10, 0))
+        ttk.Label(plot_frame, text="Y Cofactor").grid(row=4, column=3, sticky="w", pady=(10, 0))
+        ttk.Combobox(plot_frame, textvariable=self.x_transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=5, column=0, sticky="ew")
+        ttk.Spinbox(plot_frame, from_=1.0, to=10000.0, increment=10.0, textvariable=self.x_cofactor_var, width=12).grid(row=5, column=1, sticky="ew", padx=4)
+        ttk.Combobox(plot_frame, textvariable=self.y_transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=5, column=2, sticky="ew")
+        ttk.Spinbox(plot_frame, from_=1.0, to=10000.0, increment=10.0, textvariable=self.y_cofactor_var, width=12).grid(row=5, column=3, sticky="ew", padx=4)
+        self._secondary_button(plot_frame, "Graph Options", self.open_graph_options_dialog, row=6, column=2, columnspan=2, sticky="ew", pady=(8, 0))
 
         gate_frame = section(left, "Gating")
         config_grid(gate_frame, 3)
         ttk.Label(gate_frame, text="Gate Type").grid(row=0, column=0, sticky="w")
         ttk.Label(gate_frame, text="Gate Name").grid(row=0, column=1, sticky="w")
         ttk.Label(gate_frame, text="Threshold / Region").grid(row=0, column=2, sticky="w")
-        ttk.Combobox(gate_frame, textvariable=self.gate_type_var, values=["polygon", "quad", "vertical", "horizontal"], state="readonly", width=15).grid(row=1, column=0, sticky="ew")
+        ttk.Combobox(gate_frame, textvariable=self.gate_type_var, values=["polygon", "rectangle", "quad", "vertical", "horizontal"], state="readonly", width=15).grid(row=1, column=0, sticky="ew")
         ttk.Entry(gate_frame, textvariable=self.gate_name_var, width=18).grid(row=1, column=1, sticky="ew", padx=4)
         mode_detail = ttk.Frame(gate_frame)
         mode_detail.grid(row=1, column=2, sticky="ew")
@@ -494,11 +523,14 @@ class FlowDesktopApp:
         self.right_pane.add(heatmap_panel, weight=3)
         self.right_pane.add(plate_panel, weight=2)
         self.update_plate_overview()
+        self._init_drop_target()
 
     def _bind_events(self):
         self.gate_type_var.trace_add("write", lambda *_: self._update_gate_mode_visibility())
-        self.transform_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
-        self.cofactor_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
+        self.x_transform_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
+        self.x_cofactor_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
+        self.y_transform_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
+        self.y_cofactor_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
         self.y_plot_mode_var.trace_add("write", lambda *_: self._on_plot_mode_changed())
         self.max_points_var.trace_add("write", lambda *_: self.redraw() if not self.current_transformed.empty else None)
         self.population_combo.bind("<<ComboboxSelected>>", lambda _e: self.plot_population())
@@ -511,9 +543,105 @@ class FlowDesktopApp:
         self.canvas.mpl_connect("button_release_event", self._on_drag_release)
         self.root.bind("<Return>", lambda _e: self.plot_population())
 
+    def _init_drop_target(self):
+        if DND_FILES is None or TkinterDnD is None:
+            self.drop_status_var.set("Install tkinterdnd2 to enable drag and drop.")
+            return
+        try:
+            self.drop_target_label.drop_target_register(DND_FILES)
+            self.drop_target_label.dnd_bind("<<DropEnter>>", self._on_drop_enter)
+            self.drop_target_label.dnd_bind("<<DropLeave>>", self._on_drop_leave)
+            self.drop_target_label.dnd_bind("<<Drop>>", self._on_drop_files)
+            self.drop_status_var.set("Drag a folder, session JSON, or gate template JSON into this box.")
+        except Exception as exc:
+            self.drop_status_var.set(f"Drag and drop unavailable: {type(exc).__name__}: {exc}")
+
+    def _drop_target_style(self, active=False):
+        self.drop_target_label.configure(bg="#cfe0ff" if active else "#e8eefc")
+
+    def _on_drop_enter(self, _event):
+        self._drop_target_style(active=True)
+        return "copy"
+
+    def _on_drop_leave(self, _event):
+        self._drop_target_style(active=False)
+        return "copy"
+
+    def _parse_drop_paths(self, data):
+        if not data:
+            return []
+        try:
+            paths = list(self.root.tk.splitlist(data))
+        except Exception:
+            paths = shlex.split(data)
+        out = []
+        for path in paths:
+            cleaned = str(path).strip().strip("{}").strip()
+            if cleaned:
+                out.append(cleaned)
+        return out
+
+    def _load_dropped_path(self, path):
+        if os.path.isdir(path):
+            self.folder_var.set(path)
+            self.drop_status_var.set(f"Dropped folder: {path}")
+            self.load_folder()
+            return True
+        if not os.path.isfile(path):
+            raise ValueError(f"Path not found: {path}")
+        if not path.lower().endswith(".json"):
+            raise ValueError("Drop a folder, session JSON, or gate template JSON.")
+        with open(path) as fh:
+            payload = json.load(fh)
+        if payload.get("template_type") == "flow_gate_template":
+            self._load_gate_template_from_path(path, payload=payload)
+            self.drop_status_var.set(f"Loaded gate template: {os.path.basename(path)}")
+            return True
+        self._load_session_from_path(path, payload=payload)
+        self.drop_status_var.set(f"Loaded session: {os.path.basename(path)}")
+        return True
+
+    def _on_drop_files(self, event):
+        self._drop_target_style(active=False)
+        paths = self._parse_drop_paths(getattr(event, "data", ""))
+        if not paths:
+            self.drop_status_var.set("Nothing was dropped.")
+            return "copy"
+        try:
+            self._load_dropped_path(paths[0])
+            if len(paths) > 1:
+                self.drop_status_var.set(f"Loaded first dropped item and ignored {len(paths) - 1} extra item(s).")
+        except Exception as exc:
+            self.drop_status_var.set(f"Drop failed: {type(exc).__name__}: {exc}")
+        return "copy"
+
     def _auto_plot_if_ready(self):
         if self.file_map and self.x_var.get() and self.y_var.get():
             self.plot_population()
+
+    def _plot_x_transform(self):
+        return self.x_transform_var.get()
+
+    def _plot_x_cofactor(self):
+        return float(self.x_cofactor_var.get())
+
+    def _plot_y_transform(self):
+        return self.y_transform_var.get()
+
+    def _plot_y_cofactor(self):
+        return float(self.y_cofactor_var.get())
+
+    def _gate_x_transform(self, gate):
+        return gate.get("x_transform", gate.get("transform", "arcsinh"))
+
+    def _gate_x_cofactor(self, gate):
+        return float(gate.get("x_cofactor", gate.get("cofactor", 150.0)))
+
+    def _gate_y_transform(self, gate):
+        return gate.get("y_transform", gate.get("transform", "arcsinh"))
+
+    def _gate_y_cofactor(self, gate):
+        return float(gate.get("y_cofactor", gate.get("cofactor", 150.0)))
 
     def _population_display_parts(self, name):
         if name == "__all__":
@@ -1294,8 +1422,10 @@ class FlowDesktopApp:
                     group,
                     x_channel,
                     y_channel,
-                    self.transform_var.get(),
-                    self.cofactor_var.get(),
+                    self._plot_x_transform(),
+                    self._plot_x_cofactor(),
+                    y_method=self._plot_y_transform(),
+                    y_cofactor=self._plot_y_cofactor(),
                 )
             except Exception:
                 continue
@@ -1354,8 +1484,10 @@ class FlowDesktopApp:
                     group,
                     x_channel,
                     y_channel,
-                    self.transform_var.get(),
-                    self.cofactor_var.get(),
+                    self._plot_x_transform(),
+                    self._plot_x_cofactor(),
+                    y_method=self._plot_y_transform(),
+                    y_cofactor=self._plot_y_cofactor(),
                 )
             except Exception:
                 continue
@@ -1400,22 +1532,108 @@ class FlowDesktopApp:
             ymax = self.scatter_ymax_override
         return xmin, xmax, ymin, ymax
 
-    def open_axes_limits_dialog(self):
+    def _median_histogram_axis_limits(self, transformed):
+        histogram_mode = self.y_plot_mode_var.get() == "count histogram" or _is_count_axis(self.y_var.get())
+        if not histogram_mode or not self.file_map:
+            return None
+        x_channel = self.x_var.get()
+        population_name = self._selected_population_name()
+        x_bounds = []
+        global_xmin = None
+        global_xmax = None
+        for label in self.file_map:
+            try:
+                group = self._sample_population_raw_dataframe(label, population_name)
+            except Exception:
+                continue
+            if group.empty or x_channel not in group.columns:
+                continue
+            x_values = _transform_array(group[x_channel].to_numpy(), self._plot_x_transform(), self._plot_x_cofactor())
+            x_values = pd.to_numeric(pd.Series(x_values), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
+            if len(x_values) == 0:
+                continue
+            group_xmin = float(np.quantile(x_values, ROBUST_AXIS_LOWER_Q))
+            group_xmax = float(np.quantile(x_values, ROBUST_AXIS_UPPER_Q))
+            x_bounds.append((group_xmin, group_xmax))
+            global_xmin = group_xmin if global_xmin is None else min(global_xmin, group_xmin)
+            global_xmax = group_xmax if global_xmax is None else max(global_xmax, group_xmax)
+        if not x_bounds or global_xmin is None or global_xmax is None:
+            return None
+        median_xmin, median_xmax = np.median(np.asarray(x_bounds, dtype=float), axis=0)
+        xmin = float(median_xmin)
+        xmax = float(median_xmax)
+        if np.isclose(xmin, xmax):
+            pad = max(abs(xmin) * 0.05, 1.0)
+            xmin -= pad
+            xmax += pad
+        else:
+            pad = (xmax - xmin) * 0.05
+            xmin -= pad
+            xmax += pad
+        max_count = 0
+        bins = max(int(self.hist_bins_var.get()), 1)
+        edges = np.linspace(xmin, xmax, bins + 1)
+        for label in self.file_map:
+            try:
+                group = self._sample_population_raw_dataframe(label, population_name)
+            except Exception:
+                continue
+            if group.empty or x_channel not in group.columns:
+                continue
+            x_values = _transform_array(group[x_channel].to_numpy(), self._plot_x_transform(), self._plot_x_cofactor())
+            x_values = pd.to_numeric(pd.Series(x_values), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
+            if len(x_values) == 0:
+                continue
+            counts, _ = np.histogram(x_values, bins=edges)
+            if len(counts):
+                max_count = max(max_count, int(counts.max()))
+        ymax = max(float(max_count) * 1.05, 1.0)
+        return xmin, xmax, 0.0, ymax
+
+    def open_graph_options_dialog(self):
         auto_limits = self._median_scatter_axis_limits(self.current_transformed)
         slider_extent = self._global_scatter_axis_extent()
+        histogram_mode = self.y_plot_mode_var.get() == "count histogram" or _is_count_axis(self.y_var.get())
         dialog = tk.Toplevel(self.root)
-        dialog.title("Scatter Axes Limits")
+        dialog.title("Graph Options")
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.columnconfigure(1, weight=1)
+        next_row = 0
 
         def _fmt(value):
             return "" if value is None else f"{value:.4g}"
 
+        ttk.Label(dialog, text="Histogram Bins").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
+        bins_var = tk.IntVar(value=max(int(self.hist_bins_var.get()), 1))
+        ttk.Spinbox(dialog, from_=5, to=500, increment=5, textvariable=bins_var, width=10).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
+        next_row += 1
+
         current_limits = self._effective_scatter_axis_limits(self.current_transformed) or auto_limits
         if slider_extent is None or current_limits is None:
-            ttk.Label(dialog, text="Scatter limits are unavailable until a scatter plot is loaded.", wraplength=320, justify="left").grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 10))
-            ttk.Button(dialog, text="Close", command=dialog.destroy).grid(row=1, column=1, sticky="e", padx=10, pady=(0, 10))
+            message = "Scatter limits are unavailable until a scatter plot is loaded."
+            if histogram_mode:
+                hist_limits = self._median_histogram_axis_limits(self.current_transformed)
+                if hist_limits is not None:
+                    message = (
+                        "Histogram axes are shared across all loaded FCS files.\n"
+                        f"Auto X: {_fmt(hist_limits[0])} to {_fmt(hist_limits[1])}\n"
+                        f"Auto Y: {_fmt(hist_limits[2])} to {_fmt(hist_limits[3])}"
+                    )
+                else:
+                    message = "Histogram axes will be shared automatically once a histogram is loaded."
+            ttk.Label(dialog, text=message, wraplength=340, justify="left").grid(row=next_row, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 10))
+
+            def _apply_hist_only():
+                self.hist_bins_var.set(max(int(bins_var.get()), 1))
+                if not self.current_transformed.empty:
+                    self.redraw()
+                dialog.destroy()
+
+            button_row = ttk.Frame(dialog)
+            button_row.grid(row=next_row + 1, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
+            ttk.Button(button_row, text="Apply", command=_apply_hist_only).grid(row=0, column=0)
+            ttk.Button(button_row, text="Close", command=dialog.destroy).grid(row=0, column=1, padx=(6, 0))
             return
 
         xmin_limit, xmax_limit, ymin_limit, ymax_limit = slider_extent
@@ -1455,18 +1673,25 @@ class FlowDesktopApp:
                 ymin_scale.set(ymax_scale.get())
             _sync_labels()
 
-        ttk.Label(dialog, text="X Min").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))
-        ttk.Label(dialog, textvariable=xmin_var).grid(row=0, column=1, sticky="e", padx=10, pady=(10, 2))
-        ttk.Scale(dialog, from_=xmin_limit, to=xmax_limit, variable=xmin_scale, orient=tk.HORIZONTAL, command=_clamp_xmin).grid(row=1, column=0, columnspan=2, sticky="ew", padx=10)
-        ttk.Label(dialog, text="X Max").grid(row=2, column=0, sticky="w", padx=10, pady=(10, 2))
-        ttk.Label(dialog, textvariable=xmax_var).grid(row=2, column=1, sticky="e", padx=10, pady=(10, 2))
-        ttk.Scale(dialog, from_=xmin_limit, to=xmax_limit, variable=xmax_scale, orient=tk.HORIZONTAL, command=_clamp_xmax).grid(row=3, column=0, columnspan=2, sticky="ew", padx=10)
-        ttk.Label(dialog, text="Y Min").grid(row=4, column=0, sticky="w", padx=10, pady=(10, 2))
-        ttk.Label(dialog, textvariable=ymin_var).grid(row=4, column=1, sticky="e", padx=10, pady=(10, 2))
-        ttk.Scale(dialog, from_=ymin_limit, to=ymax_limit, variable=ymin_scale, orient=tk.HORIZONTAL, command=_clamp_ymin).grid(row=5, column=0, columnspan=2, sticky="ew", padx=10)
-        ttk.Label(dialog, text="Y Max").grid(row=6, column=0, sticky="w", padx=10, pady=(10, 2))
-        ttk.Label(dialog, textvariable=ymax_var).grid(row=6, column=1, sticky="e", padx=10, pady=(10, 2))
-        ttk.Scale(dialog, from_=ymin_limit, to=ymax_limit, variable=ymax_scale, orient=tk.HORIZONTAL, command=_clamp_ymax).grid(row=7, column=0, columnspan=2, sticky="ew", padx=10)
+        ttk.Label(dialog, text="X Min").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
+        ttk.Label(dialog, textvariable=xmin_var).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
+        next_row += 1
+        ttk.Scale(dialog, from_=xmin_limit, to=xmax_limit, variable=xmin_scale, orient=tk.HORIZONTAL, command=_clamp_xmin).grid(row=next_row, column=0, columnspan=2, sticky="ew", padx=10)
+        next_row += 1
+        ttk.Label(dialog, text="X Max").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
+        ttk.Label(dialog, textvariable=xmax_var).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
+        next_row += 1
+        ttk.Scale(dialog, from_=xmin_limit, to=xmax_limit, variable=xmax_scale, orient=tk.HORIZONTAL, command=_clamp_xmax).grid(row=next_row, column=0, columnspan=2, sticky="ew", padx=10)
+        next_row += 1
+        ttk.Label(dialog, text="Y Min").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
+        ttk.Label(dialog, textvariable=ymin_var).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
+        next_row += 1
+        ttk.Scale(dialog, from_=ymin_limit, to=ymax_limit, variable=ymin_scale, orient=tk.HORIZONTAL, command=_clamp_ymin).grid(row=next_row, column=0, columnspan=2, sticky="ew", padx=10)
+        next_row += 1
+        ttk.Label(dialog, text="Y Max").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
+        ttk.Label(dialog, textvariable=ymax_var).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
+        next_row += 1
+        ttk.Scale(dialog, from_=ymin_limit, to=ymax_limit, variable=ymax_scale, orient=tk.HORIZONTAL, command=_clamp_ymax).grid(row=next_row, column=0, columnspan=2, sticky="ew", padx=10)
 
         auto_label = "Automatic scatter limits unavailable until a scatter plot is loaded."
         if auto_limits is not None:
@@ -1480,10 +1705,13 @@ class FlowDesktopApp:
             f"Range X: {_fmt(xmin_limit)} to {_fmt(xmax_limit)}\n"
             f"Range Y: {_fmt(ymin_limit)} to {_fmt(ymax_limit)}"
         )
-        ttk.Label(dialog, text=auto_label, wraplength=320, justify="left").grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
-        ttk.Label(dialog, text=extent_label, wraplength=320, justify="left").grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+        next_row += 1
+        ttk.Label(dialog, text=auto_label, wraplength=320, justify="left").grid(row=next_row, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
+        next_row += 1
+        ttk.Label(dialog, text=extent_label, wraplength=320, justify="left").grid(row=next_row, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
 
         def _apply_limits():
+            self.hist_bins_var.set(max(int(bins_var.get()), 1))
             xmin = float(xmin_scale.get())
             xmax = float(xmax_scale.get())
             ymin = float(ymin_scale.get())
@@ -1503,6 +1731,7 @@ class FlowDesktopApp:
                 self.redraw()
 
         def _reset_auto():
+            self.hist_bins_var.set(max(int(bins_var.get()), 1))
             self.scatter_xmin_override = None
             self.scatter_xmax_override = None
             self.scatter_ymin_override = None
@@ -1512,7 +1741,8 @@ class FlowDesktopApp:
                 self.redraw()
 
         button_row = ttk.Frame(dialog)
-        button_row.grid(row=10, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
+        next_row += 1
+        button_row.grid(row=next_row, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
         ttk.Button(button_row, text="Use Auto", command=_reset_auto).grid(row=0, column=0)
         ttk.Button(button_row, text="Apply", command=_apply_limits).grid(row=0, column=1, padx=(6, 0))
         ttk.Button(button_row, text="Close", command=dialog.destroy).grid(row=0, column=2, padx=(6, 0))
@@ -2019,16 +2249,11 @@ open "$TARGET_APP"
         except Exception as exc:
             self.gate_status_var.set(f"Failed to save gate template: {type(exc).__name__}: {exc}")
 
-    def load_gate_template(self):
-        filename = filedialog.askopenfilename(
-            initialdir=self._session_dir(),
-            filetypes=[("JSON files", "*.json")],
-        )
-        if not filename:
-            return
+    def _load_gate_template_from_path(self, filename, payload=None):
         try:
-            with open(filename) as fh:
-                payload = json.load(fh)
+            if payload is None:
+                with open(filename) as fh:
+                    payload = json.load(fh)
             if payload.get("template_type") != "flow_gate_template":
                 raise ValueError("Selected file is not a gate template.")
             template_gates = payload.get("gates", [])
@@ -2067,6 +2292,15 @@ open "$TARGET_APP"
             self._mark_state_changed(f"Loaded gate template from {filename}")
         except Exception as exc:
             self.gate_status_var.set(f"Failed to load gate template: {type(exc).__name__}: {exc}")
+
+    def load_gate_template(self):
+        filename = filedialog.askopenfilename(
+            initialdir=self._session_dir(),
+            filetypes=[("JSON files", "*.json")],
+        )
+        if not filename:
+            return
+        self._load_gate_template_from_path(filename)
 
     def _on_close_request(self):
         choice = messagebox.askyesnocancel(
@@ -2350,8 +2584,10 @@ open "$TARGET_APP"
                     df,
                     gate["x_channel"],
                     _gate_plot_y_channel(gate),
-                    gate["transform"],
-                    gate["cofactor"],
+                    self._gate_x_transform(gate),
+                    self._gate_x_cofactor(gate),
+                    y_method=self._gate_y_transform(gate),
+                    y_cofactor=self._gate_y_cofactor(gate),
                 )
                 mask = _gate_mask(transformed, gate)
                 df = df.loc[mask].copy()
@@ -2362,8 +2598,10 @@ open "$TARGET_APP"
                 df,
                 gate["x_channel"],
                 _gate_plot_y_channel(gate),
-                gate["transform"],
-                gate["cofactor"],
+                self._gate_x_transform(gate),
+                self._gate_x_cofactor(gate),
+                y_method=self._gate_y_transform(gate),
+                y_cofactor=self._gate_y_cofactor(gate),
             )
             mask = _gate_mask(transformed, gate)
             df = df.loc[mask].copy()
@@ -2389,8 +2627,10 @@ open "$TARGET_APP"
                     df,
                     gate["x_channel"],
                     _gate_plot_y_channel(gate),
-                    gate["transform"],
-                    gate["cofactor"],
+                    self._gate_x_transform(gate),
+                    self._gate_x_cofactor(gate),
+                    y_method=self._gate_y_transform(gate),
+                    y_cofactor=self._gate_y_cofactor(gate),
                 )
                 mask = _gate_mask(transformed, gate)
                 df = df.loc[mask].copy()
@@ -2401,8 +2641,10 @@ open "$TARGET_APP"
                 df,
                 gate["x_channel"],
                 _gate_plot_y_channel(gate),
-                gate["transform"],
-                gate["cofactor"],
+                self._gate_x_transform(gate),
+                self._gate_x_cofactor(gate),
+                y_method=self._gate_y_transform(gate),
+                y_cofactor=self._gate_y_cofactor(gate),
             )
             mask = _gate_mask(transformed, gate)
             df = df.loc[mask].copy()
@@ -2425,8 +2667,10 @@ open "$TARGET_APP"
             self._selected_population_name(),
             self.x_var.get(),
             self.y_var.get(),
-            self.transform_var.get(),
-            float(self.cofactor_var.get()),
+            self._plot_x_transform(),
+            self._plot_x_cofactor(),
+            self._plot_y_transform(),
+            self._plot_y_cofactor(),
             self.y_plot_mode_var.get(),
         )
         cached = self._display_cache.get(cache_key)
@@ -2441,8 +2685,8 @@ open "$TARGET_APP"
             transformed = pd.DataFrame(index=df.index.copy())
             transformed[self.x_var.get()] = _transform_array(
                 df[self.x_var.get()].to_numpy(),
-                self.transform_var.get(),
-                self.cofactor_var.get(),
+                self._plot_x_transform(),
+                self._plot_x_cofactor(),
             )
             transformed["__well__"] = df["__well__"].to_numpy()
         else:
@@ -2450,8 +2694,10 @@ open "$TARGET_APP"
                 df,
                 self.x_var.get(),
                 self.y_var.get(),
-                self.transform_var.get(),
-                self.cofactor_var.get(),
+                self._plot_x_transform(),
+                self._plot_x_cofactor(),
+                y_method=self._plot_y_transform(),
+                y_cofactor=self._plot_y_cofactor(),
             )
             transformed["__well__"] = df["__well__"].to_numpy()
         self._display_cache[cache_key] = (df, transformed)
@@ -2465,8 +2711,10 @@ open "$TARGET_APP"
             parent_df,
             gate_spec["x_channel"],
             _gate_plot_y_channel(gate_spec),
-            gate_spec["transform"],
-            gate_spec["cofactor"],
+            self._gate_x_transform(gate_spec),
+            self._gate_x_cofactor(gate_spec),
+            y_method=self._gate_y_transform(gate_spec),
+            y_cofactor=self._gate_y_cofactor(gate_spec),
         )
         mask = _gate_mask(transformed, gate_spec)
         count = int(mask.sum())
@@ -2482,8 +2730,10 @@ open "$TARGET_APP"
                     df,
                     lineage_gate["x_channel"],
                     _gate_plot_y_channel(lineage_gate),
-                    lineage_gate["transform"],
-                    lineage_gate["cofactor"],
+                    self._gate_x_transform(lineage_gate),
+                    self._gate_x_cofactor(lineage_gate),
+                    y_method=self._gate_y_transform(lineage_gate),
+                    y_cofactor=self._gate_y_cofactor(lineage_gate),
                 )
                 mask_parent = _gate_mask(transformed_parent, lineage_gate)
                 df = df.loc[mask_parent].copy()
@@ -2493,8 +2743,10 @@ open "$TARGET_APP"
             df,
             gate_spec["x_channel"],
             _gate_plot_y_channel(gate_spec),
-            gate_spec["transform"],
-            gate_spec["cofactor"],
+            self._gate_x_transform(gate_spec),
+            self._gate_x_cofactor(gate_spec),
+            y_method=self._gate_y_transform(gate_spec),
+            y_cofactor=self._gate_y_cofactor(gate_spec),
         )
         mask = _gate_mask(transformed, gate_spec)
         count = int(mask.sum())
@@ -2723,14 +2975,15 @@ open "$TARGET_APP"
 
         labels = self._selected_labels()
         histogram_mode = self.y_plot_mode_var.get() == "count histogram" or _is_count_axis(self.y_var.get())
+        hist_bins = max(int(self.hist_bins_var.get()), 1)
         if histogram_mode:
             if len(labels) <= 1:
-                self.ax.hist(plotted[self.x_var.get()], bins=100, histtype="step", linewidth=1.8, color=self.color_cycle[0])
+                self.ax.hist(plotted[self.x_var.get()], bins=hist_bins, histtype="step", linewidth=1.8, color=self.color_cycle[0])
             else:
                 for idx, (well, group) in enumerate(plotted.groupby("__well__", sort=False)):
                     self.ax.hist(
                         group[self.x_var.get()],
-                        bins=100,
+                        bins=hist_bins,
                         histtype="step",
                         linewidth=1.6,
                         label=well,
@@ -2752,8 +3005,12 @@ open "$TARGET_APP"
                 if histogram_mode:
                     y_matches = gate["gate_type"] == "vertical"
                 if gate["x_channel"] == self.x_var.get() and y_matches:
-                    if gate["transform"] == self.transform_var.get() and np.isclose(gate["cofactor"], self.cofactor_var.get()):
-                        _render_gate(self.ax, gate, selected=(gate["name"] == selected_gate))
+                    if self._gate_x_transform(gate) == self._plot_x_transform() and np.isclose(self._gate_x_cofactor(gate), self._plot_x_cofactor()):
+                        if histogram_mode or (
+                            self._gate_y_transform(gate) == self._plot_y_transform()
+                            and np.isclose(self._gate_y_cofactor(gate), self._plot_y_cofactor())
+                        ):
+                            _render_gate(self.ax, gate, selected=(gate["name"] == selected_gate))
 
         if self.pending_gate is not None:
             spec = self._pending_to_gate_spec(preview=True)
@@ -2762,13 +3019,18 @@ open "$TARGET_APP"
 
         population_name = self._selected_population_name()
         title_name = self._population_display_label(population_name)
-        if not histogram_mode:
+        if histogram_mode:
+            hist_limits = self._median_histogram_axis_limits(transformed)
+            if hist_limits is not None:
+                self.ax.set_xlim(hist_limits[0], hist_limits[1])
+                self.ax.set_ylim(hist_limits[2], hist_limits[3])
+        else:
             scatter_limits = self._effective_scatter_axis_limits(transformed)
             if scatter_limits is not None:
                 self.ax.set_xlim(scatter_limits[0], scatter_limits[1])
                 self.ax.set_ylim(scatter_limits[2], scatter_limits[3])
-        self.ax.set_xlabel(f"{self.x_var.get()} ({self.transform_var.get()})")
-        self.ax.set_ylabel("Count" if histogram_mode else f"{self.y_var.get()} ({self.transform_var.get()})")
+        self.ax.set_xlabel(f"{self.x_var.get()} ({self._plot_x_transform()})")
+        self.ax.set_ylabel("Count" if histogram_mode else f"{self.y_var.get()} ({self._plot_y_transform()})")
         self.ax.set_title(f"{title_name} | {len(raw_df)} events")
         _apply_prism_axis_style(self.ax)
         _apply_prism_legend_style(self.ax)
@@ -2797,8 +3059,12 @@ open "$TARGET_APP"
             "gate_type": self.pending_gate.gate_type,
             "x_channel": self.x_var.get(),
             "y_channel": None if self.pending_gate.gate_type == "vertical" else self.y_var.get(),
-            "transform": self.transform_var.get(),
-            "cofactor": float(self.cofactor_var.get()),
+            "transform": self._plot_x_transform(),
+            "cofactor": self._plot_x_cofactor(),
+            "x_transform": self._plot_x_transform(),
+            "x_cofactor": self._plot_x_cofactor(),
+            "y_transform": self._plot_y_transform(),
+            "y_cofactor": self._plot_y_cofactor(),
             "color": self.color_cycle[len(self.gates) % len(self.color_cycle)],
             "gate_group": None,
         }
@@ -2815,6 +3081,7 @@ open "$TARGET_APP"
 
         self._disconnect_drawing()
         self.drag_state = None
+        self.rectangle_start_point = None
         gate_type = self.gate_type_var.get()
         if gate_type == "polygon":
             self.selector = PolygonSelector(self.ax, self._on_polygon_complete, useblit=False)
@@ -2822,6 +3089,12 @@ open "$TARGET_APP"
             self.canvas.get_tk_widget().configure(cursor="crosshair")
             self.start_draw_button.configure(text="Drawing...")
             self.gate_status_var.set("Polygon mode active. Click vertices and double-click to finish.")
+        elif gate_type == "rectangle":
+            self.canvas_click_cid = self.canvas.mpl_connect("button_press_event", self._on_rectangle_click)
+            self.mode_var.set("MODE: drawing rectangle gate")
+            self.canvas.get_tk_widget().configure(cursor="crosshair")
+            self.start_draw_button.configure(text="Drawing...")
+            self.gate_status_var.set("Rectangle mode active. Click one corner, then click the opposite corner.")
         elif gate_type == "quad":
             self.canvas_click_cid = self.canvas.mpl_connect("button_press_event", self._on_quad_click)
             self.mode_var.set("MODE: drawing quad gate")
@@ -2844,6 +3117,26 @@ open "$TARGET_APP"
     def _on_polygon_complete(self, vertices):
         self.pending_gate = PendingGate("polygon", {"vertices": [tuple(v) for v in vertices]})
         self.gate_status_var.set("Polygon captured. Click Save Gate to keep it.")
+        self._disconnect_drawing()
+        self.redraw()
+
+    def _rectangle_vertices(self, start_x, start_y, end_x, end_y):
+        x0, x1 = sorted([float(start_x), float(end_x)])
+        y0, y1 = sorted([float(start_y), float(end_y)])
+        return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+    def _on_rectangle_click(self, event):
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        point = (float(event.xdata), float(event.ydata))
+        if self.rectangle_start_point is None:
+            self.rectangle_start_point = point
+            self.gate_status_var.set("Rectangle first corner set. Click the opposite corner to finish.")
+            return
+        vertices = self._rectangle_vertices(self.rectangle_start_point[0], self.rectangle_start_point[1], point[0], point[1])
+        self.pending_gate = PendingGate("rectangle", {"vertices": vertices})
+        self.rectangle_start_point = None
+        self.gate_status_var.set("Rectangle gate captured. Click Save Gate to keep it.")
         self._disconnect_drawing()
         self.redraw()
 
@@ -2891,6 +3184,7 @@ open "$TARGET_APP"
         if self.canvas_click_cid is not None:
             self.canvas.mpl_disconnect(self.canvas_click_cid)
             self.canvas_click_cid = None
+        self.rectangle_start_point = None
         self.mode_var.set("MODE: idle")
         self.canvas.get_tk_widget().configure(cursor="")
         self.start_draw_button.configure(text="Start Drawing")
@@ -2912,9 +3206,13 @@ open "$TARGET_APP"
                     continue
             elif gate.get("y_channel") not in {None, self.y_var.get()}:
                 continue
-            if gate["transform"] != self.transform_var.get():
+            if self._gate_x_transform(gate) != self._plot_x_transform():
                 continue
-            if not np.isclose(gate["cofactor"], self.cofactor_var.get()):
+            if not np.isclose(self._gate_x_cofactor(gate), self._plot_x_cofactor()):
+                continue
+            if not histogram_mode and self._gate_y_transform(gate) != self._plot_y_transform():
+                continue
+            if not histogram_mode and not np.isclose(self._gate_y_cofactor(gate), self._plot_y_cofactor()):
                 continue
             return gate
         return None
@@ -2936,7 +3234,7 @@ open "$TARGET_APP"
             if x_hit or y_hit:
                 return {"mode": "quad"}
             return None
-        if gate["gate_type"] == "polygon":
+        if gate["gate_type"] in {"polygon", "rectangle"}:
             vertices = np.asarray(gate["vertices"])
             distances = np.sqrt(((vertices - np.array([[event.xdata, event.ydata]])) ** 2).sum(axis=1))
             if distances.min() < 0.03 * max(self.ax.get_xlim()[1] - self.ax.get_xlim()[0], 1e-9):
@@ -3102,8 +3400,10 @@ open "$TARGET_APP"
             self.x_var.set(gate["x_channel"])
         if gate.get("y_channel") and gate["y_channel"] in self.channel_names:
             self.y_var.set(gate["y_channel"])
-        self.transform_var.set(gate["transform"])
-        self.cofactor_var.set(gate["cofactor"])
+        self.x_transform_var.set(self._gate_x_transform(gate))
+        self.x_cofactor_var.set(self._gate_x_cofactor(gate))
+        self.y_transform_var.set(self._gate_y_transform(gate))
+        self.y_cofactor_var.set(self._gate_y_cofactor(gate))
         parent_population_label = self._population_display_label(gate["parent_population"])
         if parent_population_label in self.population_combo["values"]:
             self.population_var.set(parent_population_label)
@@ -3169,16 +3469,11 @@ open "$TARGET_APP"
         self._remember_recent_session(filename)
         self.gate_status_var.set(f"Saved session to {filename} and updated last-session defaults")
 
-    def load_session(self):
-        filename = filedialog.askopenfilename(
-            initialdir=self._session_dir(),
-            filetypes=[("JSON files", "*.json")],
-        )
-        if not filename:
-            return
+    def _load_session_from_path(self, filename, payload=None):
         try:
-            with open(filename) as fh:
-                payload = json.load(fh)
+            if payload is None:
+                with open(filename) as fh:
+                    payload = json.load(fh)
             self._push_undo_state()
             self._apply_session_payload(payload)
             with open(self.last_session_path, "w") as fh:
@@ -3187,6 +3482,15 @@ open "$TARGET_APP"
             self.gate_status_var.set(f"Loaded session from {filename}")
         except Exception as exc:
             self.gate_status_var.set(f"Failed to load session: {type(exc).__name__}: {exc}")
+
+    def load_session(self):
+        filename = filedialog.askopenfilename(
+            initialdir=self._session_dir(),
+            filetypes=[("JSON files", "*.json")],
+        )
+        if not filename:
+            return
+        self._load_session_from_path(filename)
 
     def rename_selected_gate(self):
         gate_name = self._selected_saved_gate_name()
@@ -3268,13 +3572,12 @@ open "$TARGET_APP"
     def _summary_dataframe(self):
         if self._summary_cache is not None:
             return self._summary_cache.copy()
-        fluorescent_gates = self._fluorescence_gates()
         rows = []
         for label, relpath, well in self._included_file_items():
             df = self._sample_raw_dataframe(label)
             row = {"well": well, "source": relpath, "event_count": len(df)}
             row = self._annotate_sample_row(row, well)
-            for gate in fluorescent_gates:
+            for gate in self.gates:
                 frac, count, parent_total = self._gate_fraction_for_label(gate, label)
                 row[f"pct_{gate['name']}"] = 100 * frac
                 row[f"count_{gate['name']}"] = count
@@ -3330,8 +3633,10 @@ open "$TARGET_APP"
                         gated_df,
                         lineage_gate["x_channel"],
                         _gate_plot_y_channel(lineage_gate),
-                        lineage_gate["transform"],
-                        lineage_gate["cofactor"],
+                        self._gate_x_transform(lineage_gate),
+                        self._gate_x_cofactor(lineage_gate),
+                        y_method=self._gate_y_transform(lineage_gate),
+                        y_cofactor=self._gate_y_cofactor(lineage_gate),
                     )
                     mask = _gate_mask(transformed, lineage_gate)
                     gated_df = gated_df.loc[mask].copy()

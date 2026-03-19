@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flow-gate-app"
-version = "0.1.7"
+version = "0.1.8"
 description = "Desktop flow cytometry gating and plate annotation app"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,7 @@ dependencies = [
   "fcsparser",
   "six",
   "decorator",
+  "tkinterdnd2",
 ]
 
 [project.scripts]
