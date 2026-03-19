@@ -43,6 +43,9 @@ The `Data` panel supports:
   - `Cytoflex`
   - `Symphony`
 - viewing detected wells in the well list
+- scrolling through long well lists
+- seeing excluded wells marked directly in the list
+- seeing mixed-channel well entries annotated with channel-count badges when channel sets differ across files
 
 Drag and drop support:
 
@@ -79,12 +82,18 @@ The `Plot` panel supports:
 - switching plot mode:
   - `scatter`
   - `count histogram`
+- choosing auto-replot behavior:
+  - `Auto`
+  - `Manual`
 - setting transform independently for each axis:
   - X transform
   - X cofactor
   - Y transform
   - Y cofactor
-- opening slider-based shared scatter axis controls with `Axes Limits`
+- opening graph controls with `Graph Options`
+- drawing a `Zoom Box`
+- resetting plot limits with `Reset Zoom`
+- viewing a mixed-channel warning banner when selected wells do not all share the same channels
 
 Supported transforms:
 
@@ -99,6 +108,23 @@ Scatter axis limit behavior:
 - shared limits use median per-file bounds
 - manual overrides can be applied with sliders
 - manual overrides can be reset back to automatic limits
+
+Histogram axis limit behavior:
+
+- histogram X and Y limits are controlled with sliders in the `Histogram` tab of `Graph Options`
+- histogram slider ranges use the full extent across all loaded FCS files
+- histogram X max extends to the maximum transformed channel value across all files plus padding
+- histogram Y max extends to the maximum histogram count across all files plus padding
+- `Apply` keeps the window open
+- `Use Auto` resets only the active plot-type limits and keeps the window open
+
+Mixed-channel plotting behavior:
+
+- channel menus use the union of channels across the selected wells
+- if selected wells do not all contain the chosen channels, the app shows a warning instead of hiding those channels
+- wells missing the current plot channels are skipped only where necessary
+- gates that depend on unavailable channels are skipped for wells that do not contain those channels
+- mixed-channel experiments can still be plotted and analyzed without forcing all files to share the same channel intersection
 
 ## Gating
 
@@ -123,6 +149,9 @@ Gating features:
 - translate full polygons
 - move quad intersections
 - move vertical and horizontal thresholds
+- cancel active drawing or zoom mode with `Esc`
+- use the visible mode banner to confirm whether the app is idle, drawing, dragging, or zooming
+- scroll saved gates, gate percentages, and gate statistics panels when content is long
 
 Gate behavior:
 
@@ -131,6 +160,7 @@ Gate behavior:
 - child populations can be gated recursively
 - saved-gate heatmaps update when gates move
 - gate statistics update from the selected gate
+- drawing and dragging only begin after real pointer movement, which improves reliability on older trackpads
 
 Gate organization:
 
@@ -174,6 +204,7 @@ Plate features:
 - mark wells excluded from downstream analysis
 - inspect well metadata in the editor
 - preview the plate layout in the main window
+- see excluded wells marked in the main well list
 
 Dose curve defaults:
 
@@ -214,6 +245,7 @@ Heatmap behavior:
 - updates after loading data
 - updates after saving, deleting, renaming, or moving gates
 - updates after plate metadata changes that affect analysis
+- updates are slightly deferred after gate edits to reduce UI stalls
 
 ## Plate Overview
 
@@ -456,6 +488,7 @@ Current limitations to be aware of:
 - automatic in-place updating is stronger on macOS than Windows
 - compensation requires a valid labeled spillover matrix when not auto-detected
 - gates are drawn in transformed coordinates, so changing transforms changes how a gate lines up visually unless the gate was created under the same transform settings
+- mixed-channel experiments are supported, but gates and plots can only use channels present in each individual well
 
 ## File Reference
 

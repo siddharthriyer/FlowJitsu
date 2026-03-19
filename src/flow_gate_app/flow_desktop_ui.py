@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 from matplotlib.widgets import PolygonSelector
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, simpledialog, ttk
@@ -130,15 +131,15 @@ class FlowDesktopApp:
         self.max_points_var = tk.IntVar(value=self.max_points_default)
         self.hist_bins_var = tk.IntVar(value=100)
         self.y_plot_mode_var = tk.StringVar(value="scatter")
+        self.auto_replot_var = tk.StringVar(value="Auto")
         self.compensation_enabled = tk.BooleanVar(value=False)
         self.compensation_source_channels = []
         self.compensation_channels = []
         self.compensation_matrix = None
         self.compensation_text = ""
-        self.scatter_xmin_override = None
-        self.scatter_xmax_override = None
-        self.scatter_ymin_override = None
-        self.scatter_ymax_override = None
+        self.hist_axis_overrides = {}
+        self.scatter_x_axis_overrides = {}
+        self.scatter_y_axis_overrides = {}
         self.gate_type_var = tk.StringVar(value="polygon")
         self.gate_name_var = tk.StringVar(value="gate_1")
         self.quad_region_var = tk.StringVar(value="top right")
@@ -146,6 +147,8 @@ class FlowDesktopApp:
         self.mode_var = tk.StringVar(value="idle")
         self.status_var = tk.StringVar(value="Choose a folder and click Load Folder.")
         self.gate_status_var = tk.StringVar(value="")
+        self.channel_warning_var = tk.StringVar(value="")
+        self.progress_var = tk.StringVar(value="Idle")
         self.version_var = tk.StringVar(value=f"Version {__version__}")
         self.autosave_var = tk.StringVar(value="Autosave: idle")
         self.heatmap_mode_var = tk.StringVar(value="percent")
@@ -154,6 +157,7 @@ class FlowDesktopApp:
         self.heatmap_channel_var = tk.StringVar(value="")
         self.heatmap_channel_y_var = tk.StringVar(value="")
         self.heatmap_title_var = tk.StringVar(value="")
+        self.heatmap_status_var = tk.StringVar(value="Heatmap ready")
         self.recent_session_var = tk.StringVar(value="")
         self.drop_status_var = tk.StringVar(value="")
 
@@ -166,6 +170,10 @@ class FlowDesktopApp:
         self._summary_cache = None
         self._intensity_cache = None
         self.channel_names = []
+        self.channel_names_by_label = {}
+        self.channel_names_by_relpath = {}
+        self.well_display_to_label = {}
+        self.has_mixed_channels = False
         self.gates = []
         self.plate_metadata = {}
         self.dose_curve_definitions = {}
@@ -178,8 +186,14 @@ class FlowDesktopApp:
         self.plate_hovered_well = None
         self.pending_gate = None
         self.rectangle_start_point = None
+        self.rectangle_current_point = None
+        self.zoom_box_start_point = None
+        self.zoom_box_current_point = None
+        self.translate_gate_mode = False
+        self.preview_artists = []
         self.selector = None
         self.canvas_click_cid = None
+        self.zoom_box_motion_cid = None
         self.drag_cid = None
         self.drag_move_cid = None
         self.drag_release_cid = None
@@ -193,6 +207,9 @@ class FlowDesktopApp:
         self.history_limit = 40
         self.suspend_history = False
         self.autosave_after_id = None
+        self.heatmap_after_id = None
+        self.gate_summary_after_id = None
+        self.plate_overview_after_id = None
         self.last_session_path = self._last_session_path()
         self._load_request_id = 0
 
@@ -207,6 +224,8 @@ class FlowDesktopApp:
         self.root.after_idle(self._set_initial_pane_sizes)
         self._refresh_recent_sessions()
         self._bind_events()
+        self._sync_mode_banner()
+        self._update_auto_replot_status()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
         self._update_gate_mode_visibility()
         self._autoload_last_session_or_folder(base_dir)
@@ -346,8 +365,15 @@ class FlowDesktopApp:
         self.drop_target_label.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0))
         ttk.Label(data_frame, textvariable=self.drop_status_var, wraplength=470).grid(row=5, column=0, columnspan=3, sticky="w", pady=(6, 0))
         ttk.Label(data_frame, text="Wells").grid(row=6, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        self.well_listbox = tk.Listbox(data_frame, selectmode=tk.EXTENDED, width=48, height=12, exportselection=False)
-        self.well_listbox.grid(row=7, column=0, columnspan=3, sticky="ew")
+        well_list_frame = ttk.Frame(data_frame)
+        well_list_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
+        well_list_frame.columnconfigure(0, weight=1)
+        well_list_frame.rowconfigure(0, weight=1)
+        self.well_listbox = tk.Listbox(well_list_frame, selectmode=tk.EXTENDED, width=48, height=12, exportselection=False)
+        self.well_listbox.grid(row=0, column=0, sticky="nsew")
+        well_scrollbar = ttk.Scrollbar(well_list_frame, orient="vertical", command=self.well_listbox.yview)
+        well_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.well_listbox.configure(yscrollcommand=well_scrollbar.set)
         self._secondary_button(data_frame, "Compensation", self.open_compensation_editor, row=8, column=0, sticky="ew", pady=(8, 0))
         self.compensation_status_var = tk.StringVar(value="Compensation: off")
         ttk.Label(data_frame, textvariable=self.compensation_status_var, wraplength=470).grid(row=8, column=1, columnspan=2, sticky="w", padx=(8, 0), pady=(10, 0))
@@ -370,15 +396,21 @@ class FlowDesktopApp:
         self.y_combo = ttk.Combobox(plot_frame, textvariable=self.y_var, state="readonly", width=20)
         self.y_combo.grid(row=3, column=1, sticky="ew", padx=4)
         ttk.Combobox(plot_frame, textvariable=self.y_plot_mode_var, values=["scatter", "count histogram"], state="readonly", width=16).grid(row=3, column=2, sticky="ew")
-        ttk.Label(plot_frame, text="X Transform").grid(row=4, column=0, sticky="w", pady=(10, 0))
-        ttk.Label(plot_frame, text="X Cofactor").grid(row=4, column=1, sticky="w", pady=(10, 0))
-        ttk.Label(plot_frame, text="Y Transform").grid(row=4, column=2, sticky="w", pady=(10, 0))
-        ttk.Label(plot_frame, text="Y Cofactor").grid(row=4, column=3, sticky="w", pady=(10, 0))
-        ttk.Combobox(plot_frame, textvariable=self.x_transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=5, column=0, sticky="ew")
-        ttk.Spinbox(plot_frame, from_=1.0, to=10000.0, increment=10.0, textvariable=self.x_cofactor_var, width=12).grid(row=5, column=1, sticky="ew", padx=4)
-        ttk.Combobox(plot_frame, textvariable=self.y_transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=5, column=2, sticky="ew")
-        ttk.Spinbox(plot_frame, from_=1.0, to=10000.0, increment=10.0, textvariable=self.y_cofactor_var, width=12).grid(row=5, column=3, sticky="ew", padx=4)
-        self._secondary_button(plot_frame, "Graph Options", self.open_graph_options_dialog, row=6, column=2, columnspan=2, sticky="ew", pady=(8, 0))
+        self.channel_warning_label = tk.Label(plot_frame, textvariable=self.channel_warning_var, anchor="w", justify="left", bg="#eef3fb", fg="#27425f", padx=8, pady=6)
+        self.channel_warning_label.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Label(plot_frame, text="X Transform").grid(row=5, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(plot_frame, text="X Cofactor").grid(row=5, column=1, sticky="w", pady=(10, 0))
+        ttk.Label(plot_frame, text="Y Transform").grid(row=5, column=2, sticky="w", pady=(10, 0))
+        ttk.Label(plot_frame, text="Y Cofactor").grid(row=5, column=3, sticky="w", pady=(10, 0))
+        ttk.Combobox(plot_frame, textvariable=self.x_transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=6, column=0, sticky="ew")
+        ttk.Spinbox(plot_frame, from_=1.0, to=10000.0, increment=10.0, textvariable=self.x_cofactor_var, width=12).grid(row=6, column=1, sticky="ew", padx=4)
+        ttk.Combobox(plot_frame, textvariable=self.y_transform_var, values=["linear", "log10", "arcsinh"], state="readonly", width=15).grid(row=6, column=2, sticky="ew")
+        ttk.Spinbox(plot_frame, from_=1.0, to=10000.0, increment=10.0, textvariable=self.y_cofactor_var, width=12).grid(row=6, column=3, sticky="ew", padx=4)
+        self._secondary_button(plot_frame, "Zoom Box", self.start_zoom_box, row=7, column=0, sticky="ew", pady=(8, 0))
+        self._secondary_button(plot_frame, "Reset Zoom", self.reset_zoom, row=7, column=1, sticky="ew", padx=4, pady=(8, 0))
+        self._secondary_button(plot_frame, "Graph Options", self.open_graph_options_dialog, row=7, column=2, sticky="ew", pady=(8, 0))
+        ttk.Label(plot_frame, text="Auto Replot").grid(row=8, column=2, sticky="w", pady=(10, 0))
+        ttk.Combobox(plot_frame, textvariable=self.auto_replot_var, values=["Auto", "Manual"], state="readonly", width=12).grid(row=8, column=3, sticky="ew", pady=(10, 0))
 
         gate_frame = section(left, "Gating")
         config_grid(gate_frame, 3)
@@ -397,19 +429,43 @@ class FlowDesktopApp:
         self.start_draw_button = self._accent_button(gate_frame, "Start Drawing", self.start_drawing, bg="#3f7f4d", fg="#1d1d1f", row=2, column=0, sticky="ew", pady=(8, 0))
         self._secondary_button(gate_frame, "Clear Pending", self.clear_pending, row=2, column=1, sticky="ew", padx=4, pady=(8, 0))
         self._accent_button(gate_frame, "Save Gate", self.save_gate, bg="#2f8c74", fg="#1d1d1f", row=2, column=2, sticky="ew", pady=(8, 0))
-        ttk.Label(gate_frame, text="Saved Gates").grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        self.saved_gate_listbox = tk.Listbox(gate_frame, selectmode=tk.SINGLE, width=48, height=8, exportselection=False)
-        self.saved_gate_listbox.grid(row=4, column=0, columnspan=3, sticky="ew")
-        ttk.Label(gate_frame, text="Gate Percentages By Well").grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        self.gate_summary_text = tk.Text(gate_frame, width=52, height=5, wrap="word")
-        self.gate_summary_text.grid(row=6, column=0, columnspan=3, sticky="ew")
+        self.mode_banner_label = tk.Label(gate_frame, textvariable=self.mode_var, anchor="w", justify="left", bg="#eff4fb", fg="#1f3550", padx=8, pady=6)
+        self.mode_banner_label.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self._secondary_button(gate_frame, "Move Selected Gate", self.start_move_selected_gate, row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        ttk.Label(gate_frame, text="Saved Gates").grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        saved_gate_frame = ttk.Frame(gate_frame)
+        saved_gate_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        saved_gate_frame.columnconfigure(0, weight=1)
+        saved_gate_frame.rowconfigure(0, weight=1)
+        self.saved_gate_listbox = tk.Listbox(saved_gate_frame, selectmode=tk.SINGLE, width=48, height=8, exportselection=False)
+        self.saved_gate_listbox.grid(row=0, column=0, sticky="nsew")
+        saved_gate_scrollbar = ttk.Scrollbar(saved_gate_frame, orient="vertical", command=self.saved_gate_listbox.yview)
+        saved_gate_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.saved_gate_listbox.configure(yscrollcommand=saved_gate_scrollbar.set)
+        ttk.Label(gate_frame, text="Gate Percentages By Well").grid(row=7, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        gate_summary_frame = ttk.Frame(gate_frame)
+        gate_summary_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        gate_summary_frame.columnconfigure(0, weight=1)
+        gate_summary_frame.rowconfigure(0, weight=1)
+        self.gate_summary_text = tk.Text(gate_summary_frame, width=52, height=5, wrap="word")
+        self.gate_summary_text.grid(row=0, column=0, sticky="nsew")
+        gate_summary_scrollbar = ttk.Scrollbar(gate_summary_frame, orient="vertical", command=self.gate_summary_text.yview)
+        gate_summary_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.gate_summary_text.configure(yscrollcommand=gate_summary_scrollbar.set)
         self.gate_summary_text.configure(state="disabled")
-        ttk.Label(gate_frame, text="Gate Statistics").grid(row=7, column=0, columnspan=3, sticky="w", pady=(8, 0))
-        self.gate_stats_text = tk.Text(gate_frame, width=52, height=6, wrap="word")
-        self.gate_stats_text.grid(row=8, column=0, columnspan=3, sticky="ew")
+        ttk.Label(gate_frame, text="Gate Statistics").grid(row=9, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        gate_stats_frame = ttk.Frame(gate_frame)
+        gate_stats_frame.grid(row=10, column=0, columnspan=3, sticky="nsew")
+        gate_stats_frame.columnconfigure(0, weight=1)
+        gate_stats_frame.rowconfigure(0, weight=1)
+        self.gate_stats_text = tk.Text(gate_stats_frame, width=52, height=6, wrap="word")
+        self.gate_stats_text.grid(row=0, column=0, sticky="nsew")
+        gate_stats_scrollbar = ttk.Scrollbar(gate_stats_frame, orient="vertical", command=self.gate_stats_text.yview)
+        gate_stats_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.gate_stats_text.configure(yscrollcommand=gate_stats_scrollbar.set)
         self.gate_stats_text.configure(state="disabled")
         gate_actions = ttk.Frame(gate_frame)
-        gate_actions.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        gate_actions.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         for idx in range(3):
             gate_actions.columnconfigure(idx, weight=1)
         self._secondary_button(gate_actions, "Delete Gate", self.delete_gate, row=0, column=0, sticky="ew")
@@ -445,6 +501,9 @@ class FlowDesktopApp:
         ttk.Label(status_frame, textvariable=self.mode_var, wraplength=470).pack(anchor="w")
         ttk.Label(status_frame, textvariable=self.status_var, wraplength=470).pack(anchor="w", pady=(6, 0))
         ttk.Label(status_frame, textvariable=self.gate_status_var, wraplength=470).pack(anchor="w", pady=(6, 0))
+        ttk.Label(status_frame, textvariable=self.progress_var, wraplength=470).pack(anchor="w", pady=(6, 0))
+        self.progressbar = ttk.Progressbar(status_frame, mode="indeterminate")
+        self.progressbar.pack(fill="x", pady=(6, 0))
 
         plot_panel = ttk.Frame(self.right_pane, padding=(0, 0, 0, 6))
         plot_panel.columnconfigure(0, weight=1)
@@ -487,6 +546,7 @@ class FlowDesktopApp:
         self.heatmap_channel_y_combo = ttk.Combobox(heatmap_controls, textvariable=self.heatmap_channel_y_var, state="readonly", width=20)
         self.heatmap_channel_y_combo.grid(row=0, column=8, sticky="w", padx=8)
         self.heatmap_channel_y_combo.bind("<<ComboboxSelected>>", lambda _e: self.update_heatmap())
+        ttk.Label(heatmap_controls, textvariable=self.heatmap_status_var).grid(row=0, column=9, sticky="e", padx=(12, 0))
         ttk.Label(heatmap_controls, text="Title").grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(heatmap_controls, textvariable=self.heatmap_title_var, width=40).grid(row=1, column=1, columnspan=3, sticky="ew", padx=8, pady=(8, 0))
         self._secondary_button(heatmap_controls, "Save Heatmap", self.save_heatmap, row=1, column=4, sticky="w", padx=8, pady=(8, 0))
@@ -518,7 +578,7 @@ class FlowDesktopApp:
         self.plate_overview_canvas.grid(row=0, column=0, sticky="nsew")
         self.plate_overview_canvas.bind("<Motion>", self._on_plate_overview_motion)
         self.plate_overview_canvas.bind("<Leave>", self._on_plate_overview_leave)
-        self.plate_overview_canvas.bind("<Configure>", lambda _e: self.update_plate_overview())
+        self.plate_overview_canvas.bind("<Configure>", lambda _e: self._schedule_plate_overview_update())
         self.right_pane.add(plot_panel, weight=6)
         self.right_pane.add(heatmap_panel, weight=3)
         self.right_pane.add(plate_panel, weight=2)
@@ -527,21 +587,24 @@ class FlowDesktopApp:
 
     def _bind_events(self):
         self.gate_type_var.trace_add("write", lambda *_: self._update_gate_mode_visibility())
+        self.mode_var.trace_add("write", lambda *_: self._sync_mode_banner())
         self.x_transform_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
         self.x_cofactor_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
         self.y_transform_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
         self.y_cofactor_var.trace_add("write", lambda *_: self._auto_plot_if_ready())
         self.y_plot_mode_var.trace_add("write", lambda *_: self._on_plot_mode_changed())
+        self.auto_replot_var.trace_add("write", lambda *_: self._update_auto_replot_status())
         self.max_points_var.trace_add("write", lambda *_: self.redraw() if not self.current_transformed.empty else None)
         self.population_combo.bind("<<ComboboxSelected>>", lambda _e: self.plot_population())
         self.saved_gate_listbox.bind("<<ListboxSelect>>", self._on_saved_gate_selected)
-        self.well_listbox.bind("<<ListboxSelect>>", lambda _e: self._auto_plot_if_ready())
+        self.well_listbox.bind("<<ListboxSelect>>", self._on_well_selection_changed)
         self.x_combo.bind("<<ComboboxSelected>>", lambda _e: self._auto_plot_if_ready())
         self.y_combo.bind("<<ComboboxSelected>>", self._on_y_axis_changed)
         self.canvas.mpl_connect("button_press_event", self._on_drag_press)
         self.canvas.mpl_connect("motion_notify_event", self._on_drag_motion)
         self.canvas.mpl_connect("button_release_event", self._on_drag_release)
         self.root.bind("<Return>", lambda _e: self.plot_population())
+        self.root.bind("<Escape>", self._on_escape_pressed)
 
     def _init_drop_target(self):
         if DND_FILES is None or TkinterDnD is None:
@@ -615,9 +678,88 @@ class FlowDesktopApp:
             self.drop_status_var.set(f"Drop failed: {type(exc).__name__}: {exc}")
         return "copy"
 
+    def _on_well_selection_changed(self, _event=None):
+        self._refresh_channel_controls()
+        self._auto_plot_if_ready()
+
     def _auto_plot_if_ready(self):
+        if self.auto_replot_var.get() != "Auto":
+            return
         if self.file_map and self.x_var.get() and self.y_var.get():
             self.plot_population()
+
+    def _update_auto_replot_status(self):
+        if self.auto_replot_var.get() == "Auto":
+            self.progress_var.set("Auto replot: on")
+        else:
+            self.progress_var.set("Auto replot: manual")
+
+    def _set_busy(self, active, message=""):
+        if message:
+            self.progress_var.set(message)
+        elif not active:
+            self._update_auto_replot_status()
+        if not hasattr(self, "progressbar"):
+            return
+        if active:
+            self.progressbar.start(10)
+        else:
+            self.progressbar.stop()
+
+    def _sync_mode_banner(self):
+        mode_text = self.mode_var.get()
+        if not hasattr(self, "mode_banner_label"):
+            return
+        lowered = mode_text.lower()
+        if "zoom" in lowered:
+            bg = "#f6ead3"
+            fg = "#6b4a12"
+        elif "draw" in lowered or "drag" in lowered:
+            bg = "#dff1e4"
+            fg = "#204a2b"
+        else:
+            bg = "#eff4fb"
+            fg = "#1f3550"
+        self.mode_banner_label.configure(bg=bg, fg=fg)
+
+    def _on_escape_pressed(self, _event=None):
+        if self.selector is None and self.canvas_click_cid is None and self.drag_state is None and self.pending_gate is None:
+            return
+        self.pending_gate = None
+        self.drag_state = None
+        self._disconnect_drawing()
+        self.redraw()
+        self.gate_status_var.set("Cancelled active drawing or drag mode.")
+
+    def _well_display_label(self, label):
+        relpath = self.file_map.get(label, "")
+        well = label.split(" | ")[0]
+        if self._metadata_for_well(well).get("excluded", False):
+            return f"[EXCLUDED] {label}"
+        if relpath:
+            channels = self.channel_names_by_label.get(label, [])
+            if self.has_mixed_channels and channels:
+                return f"{label} [{len(channels)} ch]"
+        return label
+
+    def _base_well_label(self, display_label):
+        return self.well_display_to_label.get(display_label, display_label)
+
+    def _refresh_well_listbox(self, selected_labels=None):
+        selected_labels = selected_labels or self._selected_labels()
+        self.well_display_to_label = {}
+        self.well_listbox.delete(0, tk.END)
+        selected_indices = []
+        for idx, label in enumerate(self.file_map):
+            display_label = self._well_display_label(label)
+            self.well_display_to_label[display_label] = label
+            self.well_listbox.insert(tk.END, display_label)
+            if label in selected_labels:
+                selected_indices.append(idx)
+        if not selected_indices and self.file_map:
+            selected_indices = [0]
+        for idx in selected_indices:
+            self.well_listbox.selection_set(idx)
 
     def _plot_x_transform(self):
         return self.x_transform_var.get()
@@ -907,15 +1049,16 @@ class FlowDesktopApp:
         return defs
 
     def _on_plot_mode_changed(self):
+        available_channels = self._selected_channel_union()
         if self.y_plot_mode_var.get() == "count histogram":
             self.y_var.set("Count")
         elif _is_count_axis(self.y_var.get()):
-            if "SSC-A" in self.channel_names:
+            if "SSC-A" in available_channels:
                 self.y_var.set("SSC-A")
-            elif len(self.channel_names) > 1:
-                self.y_var.set(self.channel_names[1])
-            elif self.channel_names:
-                self.y_var.set(self.channel_names[0])
+            elif len(available_channels) > 1:
+                self.y_var.set(available_channels[1])
+            elif available_channels:
+                self.y_var.set(available_channels[0])
         self._auto_plot_if_ready()
 
     def _update_heatmap_control_visibility(self):
@@ -1379,10 +1522,10 @@ class FlowDesktopApp:
             self._update_compensation_status()
             dialog.destroy()
             if not self.current_data.empty or self.file_map:
-                self._update_gate_summary_panel()
+                self._schedule_gate_summary_update()
                 self._refresh_heatmap_options()
                 self.update_heatmap()
-                self.update_plate_overview()
+                self._schedule_plate_overview_update()
                 if self._selected_labels():
                     self.plot_population()
 
@@ -1517,19 +1660,39 @@ class FlowDesktopApp:
             ymax += pad
         return xmin, xmax, ymin, ymax
 
+    def _scatter_x_axis_override_key(self):
+        if self.y_plot_mode_var.get() != "scatter" or _is_count_axis(self.y_var.get()):
+            return None
+        x_channel = self.x_var.get()
+        if not x_channel:
+            return None
+        return x_channel
+
+    def _scatter_y_axis_override_key(self):
+        if self.y_plot_mode_var.get() != "scatter" or _is_count_axis(self.y_var.get()):
+            return None
+        y_channel = self.y_var.get()
+        if not y_channel or _is_count_axis(y_channel):
+            return None
+        return y_channel
+
+    def _hist_axis_override_key(self):
+        x_channel = self.x_var.get()
+        if not x_channel:
+            return None
+        return (x_channel,)
+
     def _effective_scatter_axis_limits(self, transformed):
         base_limits = self._median_scatter_axis_limits(transformed)
         if base_limits is None:
             return None
         xmin, xmax, ymin, ymax = base_limits
-        if self.scatter_xmin_override is not None:
-            xmin = self.scatter_xmin_override
-        if self.scatter_xmax_override is not None:
-            xmax = self.scatter_xmax_override
-        if self.scatter_ymin_override is not None:
-            ymin = self.scatter_ymin_override
-        if self.scatter_ymax_override is not None:
-            ymax = self.scatter_ymax_override
+        x_override = self.scatter_x_axis_overrides.get(self._scatter_x_axis_override_key())
+        y_override = self.scatter_y_axis_overrides.get(self._scatter_y_axis_override_key())
+        if x_override is not None:
+            xmin, xmax = x_override
+        if y_override is not None:
+            ymin, ymax = y_override
         return xmin, xmax, ymin, ymax
 
     def _median_histogram_axis_limits(self, transformed):
@@ -1590,162 +1753,269 @@ class FlowDesktopApp:
         ymax = max(float(max_count) * 1.05, 1.0)
         return xmin, xmax, 0.0, ymax
 
+    def _effective_histogram_axis_limits(self, transformed):
+        base_limits = self._median_histogram_axis_limits(transformed)
+        if base_limits is None:
+            return None
+        xmin, xmax, ymin, ymax = base_limits
+        override = self.hist_axis_overrides.get(self._hist_axis_override_key())
+        if override is not None:
+            xmin, xmax, ymin, ymax = override
+        return xmin, xmax, ymin, ymax
+
+    def _global_histogram_axis_extent(self):
+        histogram_mode = self.y_plot_mode_var.get() == "count histogram" or _is_count_axis(self.y_var.get())
+        if not histogram_mode or not self.file_map:
+            return None
+        x_channel = self.x_var.get()
+        population_name = self._selected_population_name()
+        global_xmin = None
+        global_xmax = None
+        transformed_groups = []
+        for label in self.file_map:
+            try:
+                group = self._sample_population_raw_dataframe(label, population_name)
+            except Exception:
+                continue
+            if group.empty or x_channel not in group.columns:
+                continue
+            x_values = _transform_array(group[x_channel].to_numpy(), self._plot_x_transform(), self._plot_x_cofactor())
+            x_values = pd.to_numeric(pd.Series(x_values), errors="coerce").replace([np.inf, -np.inf], np.nan).dropna().to_numpy()
+            if len(x_values) == 0:
+                continue
+            transformed_groups.append(x_values)
+            group_xmin = float(np.min(x_values))
+            group_xmax = float(np.max(x_values))
+            global_xmin = group_xmin if global_xmin is None else min(global_xmin, group_xmin)
+            global_xmax = group_xmax if global_xmax is None else max(global_xmax, group_xmax)
+        if global_xmin is None or global_xmax is None:
+            return None
+        if np.isclose(global_xmin, global_xmax):
+            x_pad = max(abs(global_xmax) * 0.1, 1.0)
+        else:
+            x_pad = (global_xmax - global_xmin) * 0.1
+        xmin_limit = global_xmin - x_pad
+        xmax_limit = global_xmax + x_pad
+        bins = max(int(self.hist_bins_var.get()), 1)
+        edges = np.linspace(xmin_limit, xmax_limit, bins + 1)
+        max_count = 0
+        for x_values in transformed_groups:
+            counts, _ = np.histogram(x_values, bins=edges)
+            if len(counts):
+                max_count = max(max_count, int(counts.max()))
+        ymax_limit = max(float(max_count) * 1.1, 1.0)
+        return xmin_limit, xmax_limit, 0.0, ymax_limit
+
     def open_graph_options_dialog(self):
         auto_limits = self._median_scatter_axis_limits(self.current_transformed)
-        slider_extent = self._global_scatter_axis_extent()
+        scatter_limits = self._effective_scatter_axis_limits(self.current_transformed) or auto_limits
+        scatter_extent = self._global_scatter_axis_extent()
+        hist_limits = self._effective_histogram_axis_limits(self.current_transformed)
+        auto_hist_limits = self._median_histogram_axis_limits(self.current_transformed)
+        hist_extent = self._global_histogram_axis_extent()
         histogram_mode = self.y_plot_mode_var.get() == "count histogram" or _is_count_axis(self.y_var.get())
+
         dialog = tk.Toplevel(self.root)
         dialog.title("Graph Options")
         dialog.transient(self.root)
         dialog.grab_set()
-        dialog.columnconfigure(1, weight=1)
-        next_row = 0
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
 
         def _fmt(value):
             return "" if value is None else f"{value:.4g}"
 
-        ttk.Label(dialog, text="Histogram Bins").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
-        bins_var = tk.IntVar(value=max(int(self.hist_bins_var.get()), 1))
-        ttk.Spinbox(dialog, from_=5, to=500, increment=5, textvariable=bins_var, width=10).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
-        next_row += 1
+        notebook = ttk.Notebook(dialog)
+        notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
-        current_limits = self._effective_scatter_axis_limits(self.current_transformed) or auto_limits
-        if slider_extent is None or current_limits is None:
-            message = "Scatter limits are unavailable until a scatter plot is loaded."
-            if histogram_mode:
-                hist_limits = self._median_histogram_axis_limits(self.current_transformed)
-                if hist_limits is not None:
-                    message = (
-                        "Histogram axes are shared across all loaded FCS files.\n"
-                        f"Auto X: {_fmt(hist_limits[0])} to {_fmt(hist_limits[1])}\n"
-                        f"Auto Y: {_fmt(hist_limits[2])} to {_fmt(hist_limits[3])}"
-                    )
-                else:
-                    message = "Histogram axes will be shared automatically once a histogram is loaded."
-            ttk.Label(dialog, text=message, wraplength=340, justify="left").grid(row=next_row, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 10))
+        scatter_tab = ttk.Frame(notebook, padding=10)
+        scatter_tab.columnconfigure(0, weight=1)
+        histogram_tab = ttk.Frame(notebook, padding=10)
+        histogram_tab.columnconfigure(0, weight=1)
+        notebook.add(scatter_tab, text="Scatter")
+        notebook.add(histogram_tab, text="Histogram")
+        notebook.select(1 if histogram_mode else 0)
 
-            def _apply_hist_only():
-                self.hist_bins_var.set(max(int(bins_var.get()), 1))
+        def _scale_row(parent, row, label_text, variable, from_, to_, clamp_callback):
+            value_var = tk.StringVar(value=_fmt(variable.get()))
+            ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky="w", pady=(10, 2))
+            ttk.Label(parent, textvariable=value_var).grid(row=row, column=1, sticky="e", pady=(10, 2))
+            ttk.Scale(parent, from_=from_, to=to_, variable=variable, orient=tk.HORIZONTAL, command=lambda _value: (clamp_callback(), value_var.set(_fmt(variable.get())))).grid(row=row + 1, column=0, columnspan=2, sticky="ew")
+            return value_var
+
+        scatter_frame = ttk.LabelFrame(scatter_tab, text="Scatter Limits", padding=10)
+        scatter_frame.grid(row=0, column=0, sticky="ew")
+        scatter_frame.columnconfigure(0, weight=1)
+        scatter_frame.columnconfigure(1, weight=0)
+        scatter_button_row = ttk.Frame(scatter_tab)
+        scatter_button_row.grid(row=1, column=0, sticky="e", pady=(10, 0))
+
+        def _reset_scatter_auto():
+            scatter_x_key = self._scatter_x_axis_override_key()
+            scatter_y_key = self._scatter_y_axis_override_key()
+            if scatter_x_key is not None:
+                self.scatter_x_axis_overrides.pop(scatter_x_key, None)
+            if scatter_y_key is not None:
+                self.scatter_y_axis_overrides.pop(scatter_y_key, None)
+            if not self.current_transformed.empty:
+                self.redraw()
+
+        if scatter_limits is None or scatter_extent is None:
+            ttk.Label(scatter_frame, text="Scatter limits are unavailable until a scatter plot is loaded.", wraplength=360, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
+        else:
+            xmin_limit, xmax_limit, ymin_limit, ymax_limit = scatter_extent
+            xmin_scale = tk.DoubleVar(value=scatter_limits[0])
+            xmax_scale = tk.DoubleVar(value=scatter_limits[1])
+            ymin_scale = tk.DoubleVar(value=scatter_limits[2])
+            ymax_scale = tk.DoubleVar(value=scatter_limits[3])
+
+            def _clamp_scatter_xmin():
+                if xmin_scale.get() > xmax_scale.get():
+                    xmax_scale.set(xmin_scale.get())
+
+            def _clamp_scatter_xmax():
+                if xmax_scale.get() < xmin_scale.get():
+                    xmin_scale.set(xmax_scale.get())
+
+            def _clamp_scatter_ymin():
+                if ymin_scale.get() > ymax_scale.get():
+                    ymax_scale.set(ymin_scale.get())
+
+            def _clamp_scatter_ymax():
+                if ymax_scale.get() < ymin_scale.get():
+                    ymin_scale.set(ymax_scale.get())
+
+            _scale_row(scatter_frame, 0, "X Min", xmin_scale, xmin_limit, xmax_limit, _clamp_scatter_xmin)
+            _scale_row(scatter_frame, 2, "X Max", xmax_scale, xmin_limit, xmax_limit, _clamp_scatter_xmax)
+            _scale_row(scatter_frame, 4, "Y Min", ymin_scale, ymin_limit, ymax_limit, _clamp_scatter_ymin)
+            _scale_row(scatter_frame, 6, "Y Max", ymax_scale, ymin_limit, ymax_limit, _clamp_scatter_ymax)
+            auto_label = "Automatic scatter limits unavailable until a scatter plot is loaded."
+            if auto_limits is not None:
+                auto_label = (
+                    f"Automatic limits use the median bounds across all loaded FCS files.\n"
+                    f"Auto X: {_fmt(auto_limits[0])} to {_fmt(auto_limits[1])}\n"
+                    f"Auto Y: {_fmt(auto_limits[2])} to {_fmt(auto_limits[3])}"
+                )
+            extent_label = (
+                f"Slider range uses the full global extent across all loaded FCS files.\n"
+                f"Range X: {_fmt(xmin_limit)} to {_fmt(xmax_limit)}\n"
+                f"Range Y: {_fmt(ymin_limit)} to {_fmt(ymax_limit)}"
+            )
+            ttk.Label(scatter_frame, text=auto_label, wraplength=360, justify="left").grid(row=8, column=0, columnspan=2, sticky="w", pady=(8, 4))
+            ttk.Label(scatter_frame, text=extent_label, wraplength=360, justify="left").grid(row=9, column=0, columnspan=2, sticky="w")
+
+            def _apply_scatter_limits():
+                xmin = float(xmin_scale.get())
+                xmax = float(xmax_scale.get())
+                ymin = float(ymin_scale.get())
+                ymax = float(ymax_scale.get())
+                if xmin >= xmax:
+                    messagebox.showerror("Invalid Limits", "X Min must be less than X Max.", parent=dialog)
+                    return
+                if ymin >= ymax:
+                    messagebox.showerror("Invalid Limits", "Y Min must be less than Y Max.", parent=dialog)
+                    return
+                scatter_x_key = self._scatter_x_axis_override_key()
+                scatter_y_key = self._scatter_y_axis_override_key()
+                if scatter_x_key is not None:
+                    self.scatter_x_axis_overrides[scatter_x_key] = (xmin, xmax)
+                if scatter_y_key is not None:
+                    self.scatter_y_axis_overrides[scatter_y_key] = (ymin, ymax)
                 if not self.current_transformed.empty:
                     self.redraw()
-                dialog.destroy()
+            ttk.Button(scatter_button_row, text="Use Auto", command=_reset_scatter_auto).grid(row=0, column=0)
+            ttk.Button(scatter_button_row, text="Apply", command=_apply_scatter_limits).grid(row=0, column=1, padx=(6, 0))
+        if not scatter_button_row.winfo_children():
+            ttk.Button(scatter_button_row, text="Use Auto", command=_reset_scatter_auto).grid(row=0, column=0)
 
-            button_row = ttk.Frame(dialog)
-            button_row.grid(row=next_row + 1, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
-            ttk.Button(button_row, text="Apply", command=_apply_hist_only).grid(row=0, column=0)
-            ttk.Button(button_row, text="Close", command=dialog.destroy).grid(row=0, column=1, padx=(6, 0))
-            return
+        histogram_frame = ttk.LabelFrame(histogram_tab, text="Histogram Limits", padding=10)
+        histogram_frame.grid(row=0, column=0, sticky="ew")
+        histogram_frame.columnconfigure(0, weight=1)
+        histogram_frame.columnconfigure(1, weight=0)
+        ttk.Label(histogram_frame, text="Histogram Bins").grid(row=0, column=0, sticky="w", pady=(0, 2))
+        bins_var = tk.IntVar(value=max(int(self.hist_bins_var.get()), 1))
+        ttk.Spinbox(histogram_frame, from_=5, to=500, increment=5, textvariable=bins_var, width=10).grid(row=0, column=1, sticky="e", pady=(0, 2))
+        histogram_button_row = ttk.Frame(histogram_tab)
+        histogram_button_row.grid(row=1, column=0, sticky="e", pady=(10, 0))
 
-        xmin_limit, xmax_limit, ymin_limit, ymax_limit = slider_extent
-        xmin_current, xmax_current, ymin_current, ymax_current = current_limits
-        xmin_var = tk.StringVar(value=_fmt(xmin_current))
-        xmax_var = tk.StringVar(value=_fmt(xmax_current))
-        ymin_var = tk.StringVar(value=_fmt(ymin_current))
-        ymax_var = tk.StringVar(value=_fmt(ymax_current))
-        xmin_scale = tk.DoubleVar(value=xmin_current)
-        xmax_scale = tk.DoubleVar(value=xmax_current)
-        ymin_scale = tk.DoubleVar(value=ymin_current)
-        ymax_scale = tk.DoubleVar(value=ymax_current)
+        def _reset_hist_auto():
+            self.hist_bins_var.set(max(int(bins_var.get()), 1))
+            hist_key = self._hist_axis_override_key()
+            if hist_key is not None:
+                self.hist_axis_overrides.pop(hist_key, None)
+            if not self.current_transformed.empty:
+                self.redraw()
 
-        def _sync_labels():
-            xmin_var.set(_fmt(xmin_scale.get()))
-            xmax_var.set(_fmt(xmax_scale.get()))
-            ymin_var.set(_fmt(ymin_scale.get()))
-            ymax_var.set(_fmt(ymax_scale.get()))
+        if hist_limits is None or hist_extent is None:
+            ttk.Label(histogram_frame, text="Histogram axes will be shared automatically once a histogram is loaded.", wraplength=360, justify="left").grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        else:
+            hist_xmin_limit, hist_xmax_limit, hist_ymin_limit, hist_ymax_limit = hist_extent
+            hist_xmin_scale = tk.DoubleVar(value=hist_limits[0])
+            hist_xmax_scale = tk.DoubleVar(value=hist_limits[1])
+            hist_ymin_scale = tk.DoubleVar(value=hist_limits[2])
+            hist_ymax_scale = tk.DoubleVar(value=hist_limits[3])
 
-        def _clamp_xmin(_value=None):
-            if xmin_scale.get() > xmax_scale.get():
-                xmax_scale.set(xmin_scale.get())
-            _sync_labels()
+            def _clamp_hist_xmin():
+                if hist_xmin_scale.get() > hist_xmax_scale.get():
+                    hist_xmax_scale.set(hist_xmin_scale.get())
 
-        def _clamp_xmax(_value=None):
-            if xmax_scale.get() < xmin_scale.get():
-                xmin_scale.set(xmax_scale.get())
-            _sync_labels()
+            def _clamp_hist_xmax():
+                if hist_xmax_scale.get() < hist_xmin_scale.get():
+                    hist_xmin_scale.set(hist_xmax_scale.get())
 
-        def _clamp_ymin(_value=None):
-            if ymin_scale.get() > ymax_scale.get():
-                ymax_scale.set(ymin_scale.get())
-            _sync_labels()
+            def _clamp_hist_ymin():
+                if hist_ymin_scale.get() > hist_ymax_scale.get():
+                    hist_ymax_scale.set(hist_ymin_scale.get())
 
-        def _clamp_ymax(_value=None):
-            if ymax_scale.get() < ymin_scale.get():
-                ymin_scale.set(ymax_scale.get())
-            _sync_labels()
+            def _clamp_hist_ymax():
+                if hist_ymax_scale.get() < hist_ymin_scale.get():
+                    hist_ymin_scale.set(hist_ymax_scale.get())
 
-        ttk.Label(dialog, text="X Min").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
-        ttk.Label(dialog, textvariable=xmin_var).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
-        next_row += 1
-        ttk.Scale(dialog, from_=xmin_limit, to=xmax_limit, variable=xmin_scale, orient=tk.HORIZONTAL, command=_clamp_xmin).grid(row=next_row, column=0, columnspan=2, sticky="ew", padx=10)
-        next_row += 1
-        ttk.Label(dialog, text="X Max").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
-        ttk.Label(dialog, textvariable=xmax_var).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
-        next_row += 1
-        ttk.Scale(dialog, from_=xmin_limit, to=xmax_limit, variable=xmax_scale, orient=tk.HORIZONTAL, command=_clamp_xmax).grid(row=next_row, column=0, columnspan=2, sticky="ew", padx=10)
-        next_row += 1
-        ttk.Label(dialog, text="Y Min").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
-        ttk.Label(dialog, textvariable=ymin_var).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
-        next_row += 1
-        ttk.Scale(dialog, from_=ymin_limit, to=ymax_limit, variable=ymin_scale, orient=tk.HORIZONTAL, command=_clamp_ymin).grid(row=next_row, column=0, columnspan=2, sticky="ew", padx=10)
-        next_row += 1
-        ttk.Label(dialog, text="Y Max").grid(row=next_row, column=0, sticky="w", padx=10, pady=(10, 2))
-        ttk.Label(dialog, textvariable=ymax_var).grid(row=next_row, column=1, sticky="e", padx=10, pady=(10, 2))
-        next_row += 1
-        ttk.Scale(dialog, from_=ymin_limit, to=ymax_limit, variable=ymax_scale, orient=tk.HORIZONTAL, command=_clamp_ymax).grid(row=next_row, column=0, columnspan=2, sticky="ew", padx=10)
-
-        auto_label = "Automatic scatter limits unavailable until a scatter plot is loaded."
-        if auto_limits is not None:
-            auto_label = (
-                f"Automatic limits use the median bounds across all loaded FCS files.\n"
-                f"Auto X: {_fmt(auto_limits[0])} to {_fmt(auto_limits[1])}\n"
-                f"Auto Y: {_fmt(auto_limits[2])} to {_fmt(auto_limits[3])}"
+            _scale_row(histogram_frame, 1, "Histogram X Min", hist_xmin_scale, hist_xmin_limit, hist_xmax_limit, _clamp_hist_xmin)
+            _scale_row(histogram_frame, 3, "Histogram X Max", hist_xmax_scale, hist_xmin_limit, hist_xmax_limit, _clamp_hist_xmax)
+            _scale_row(histogram_frame, 5, "Histogram Y Min", hist_ymin_scale, hist_ymin_limit, hist_ymax_limit, _clamp_hist_ymin)
+            _scale_row(histogram_frame, 7, "Histogram Y Max", hist_ymax_scale, hist_ymin_limit, hist_ymax_limit, _clamp_hist_ymax)
+            auto_message = "Histogram auto limits unavailable until a histogram is loaded."
+            if auto_hist_limits is not None:
+                auto_message = (
+                    "Histogram axes are shared across all loaded FCS files.\n"
+                    f"Auto X: {_fmt(auto_hist_limits[0])} to {_fmt(auto_hist_limits[1])}\n"
+                    f"Auto Y: {_fmt(auto_hist_limits[2])} to {_fmt(auto_hist_limits[3])}"
+                )
+            extent_message = (
+                "Slider range uses the full histogram extent across all loaded FCS files.\n"
+                f"Range X: {_fmt(hist_xmin_limit)} to {_fmt(hist_xmax_limit)}\n"
+                f"Range Y: {_fmt(hist_ymin_limit)} to {_fmt(hist_ymax_limit)}"
             )
-        extent_label = (
-            f"Slider range uses the full global extent across all loaded FCS files.\n"
-            f"Range X: {_fmt(xmin_limit)} to {_fmt(xmax_limit)}\n"
-            f"Range Y: {_fmt(ymin_limit)} to {_fmt(ymax_limit)}"
-        )
-        next_row += 1
-        ttk.Label(dialog, text=auto_label, wraplength=320, justify="left").grid(row=next_row, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
-        next_row += 1
-        ttk.Label(dialog, text=extent_label, wraplength=320, justify="left").grid(row=next_row, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 10))
+            ttk.Label(histogram_frame, text=auto_message, wraplength=360, justify="left").grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 4))
+            ttk.Label(histogram_frame, text=extent_message, wraplength=360, justify="left").grid(row=10, column=0, columnspan=2, sticky="w")
 
-        def _apply_limits():
-            self.hist_bins_var.set(max(int(bins_var.get()), 1))
-            xmin = float(xmin_scale.get())
-            xmax = float(xmax_scale.get())
-            ymin = float(ymin_scale.get())
-            ymax = float(ymax_scale.get())
-            if xmin is not None and xmax is not None and xmin >= xmax:
-                messagebox.showerror("Invalid Limits", "X Min must be less than X Max.", parent=dialog)
-                return
-            if ymin is not None and ymax is not None and ymin >= ymax:
-                messagebox.showerror("Invalid Limits", "Y Min must be less than Y Max.", parent=dialog)
-                return
-            self.scatter_xmin_override = xmin
-            self.scatter_xmax_override = xmax
-            self.scatter_ymin_override = ymin
-            self.scatter_ymax_override = ymax
-            dialog.destroy()
-            if not self.current_transformed.empty:
-                self.redraw()
+            def _apply_hist_limits():
+                self.hist_bins_var.set(max(int(bins_var.get()), 1))
+                xmin = float(hist_xmin_scale.get())
+                xmax = float(hist_xmax_scale.get())
+                ymin = float(hist_ymin_scale.get())
+                ymax = float(hist_ymax_scale.get())
+                if xmin >= xmax:
+                    messagebox.showerror("Invalid Limits", "Histogram X Min must be less than X Max.", parent=dialog)
+                    return
+                if ymin >= ymax:
+                    messagebox.showerror("Invalid Limits", "Histogram Y Min must be less than Y Max.", parent=dialog)
+                    return
+                hist_key = self._hist_axis_override_key()
+                if hist_key is not None:
+                    self.hist_axis_overrides[hist_key] = (xmin, xmax, ymin, ymax)
+                if not self.current_transformed.empty:
+                    self.redraw()
+            ttk.Button(histogram_button_row, text="Use Auto", command=_reset_hist_auto).grid(row=0, column=0)
+            ttk.Button(histogram_button_row, text="Apply", command=_apply_hist_limits).grid(row=0, column=1, padx=(6, 0))
+        if not histogram_button_row.winfo_children():
+            ttk.Button(histogram_button_row, text="Use Auto", command=_reset_hist_auto).grid(row=0, column=0)
+            ttk.Button(histogram_button_row, text="Apply", command=lambda: (self.hist_bins_var.set(max(int(bins_var.get()), 1)), (not self.current_transformed.empty) and self.redraw())).grid(row=0, column=1, padx=(6, 0))
 
-        def _reset_auto():
-            self.hist_bins_var.set(max(int(bins_var.get()), 1))
-            self.scatter_xmin_override = None
-            self.scatter_xmax_override = None
-            self.scatter_ymin_override = None
-            self.scatter_ymax_override = None
-            dialog.destroy()
-            if not self.current_transformed.empty:
-                self.redraw()
-
-        button_row = ttk.Frame(dialog)
-        next_row += 1
-        button_row.grid(row=next_row, column=0, columnspan=2, sticky="e", padx=10, pady=(0, 10))
-        ttk.Button(button_row, text="Use Auto", command=_reset_auto).grid(row=0, column=0)
-        ttk.Button(button_row, text="Apply", command=_apply_limits).grid(row=0, column=1, padx=(6, 0))
-        ttk.Button(button_row, text="Close", command=dialog.destroy).grid(row=0, column=2, padx=(6, 0))
+        close_row = ttk.Frame(dialog)
+        close_row.grid(row=1, column=0, sticky="e", padx=10, pady=(0, 10))
+        ttk.Button(close_row, text="Close", command=dialog.destroy).grid(row=0, column=0)
 
     def _latest_release_info(self):
         request = urllib.request.Request(
@@ -2113,14 +2383,21 @@ open "$TARGET_APP"
             self.undo_stack = self.undo_stack[-self.history_limit:]
         self.redo_stack.clear()
 
-    def _mark_state_changed(self, message="State updated"):
+    def _mark_state_changed(self, message="State updated", invalidate=False, refresh_plate=False, refresh_wells=False, refresh_gate_summary=False, refresh_heatmap=True):
         if self.suspend_history:
             return
-        self._invalidate_computation_cache()
-        self.update_plate_overview()
-        self._schedule_autosave()
+        if invalidate:
+            self._invalidate_computation_cache()
+        if refresh_wells:
+            self._refresh_well_listbox()
+        if refresh_plate:
+            self._schedule_plate_overview_update()
+        if refresh_gate_summary:
+            self._schedule_gate_summary_update()
         self._refresh_recent_sessions()
         self.gate_status_var.set(message)
+        if refresh_heatmap:
+            self._schedule_heatmap_update()
 
     def _invalidate_computation_cache(self):
         self._selected_raw_cache.clear()
@@ -2130,17 +2407,48 @@ open "$TARGET_APP"
         self._summary_cache = None
         self._intensity_cache = None
 
+    def _schedule_heatmap_update(self, delay_ms=75):
+        if self.heatmap_after_id is not None:
+            try:
+                self.root.after_cancel(self.heatmap_after_id)
+            except Exception:
+                pass
+        self.heatmap_status_var.set("Updating heatmap...")
+        self.heatmap_after_id = self.root.after(delay_ms, self._run_scheduled_heatmap_update)
+
+    def _run_scheduled_heatmap_update(self):
+        self.heatmap_after_id = None
+        self.update_heatmap()
+
+    def _schedule_gate_summary_update(self, delay_ms=150):
+        if self.gate_summary_after_id is not None:
+            try:
+                self.root.after_cancel(self.gate_summary_after_id)
+            except Exception:
+                pass
+        self.gate_summary_after_id = self.root.after(delay_ms, self._run_scheduled_gate_summary_update)
+
+    def _run_scheduled_gate_summary_update(self):
+        self.gate_summary_after_id = None
+        self._update_gate_summary_panel()
+
+    def _schedule_plate_overview_update(self, delay_ms=100):
+        if self.plate_overview_after_id is not None:
+            try:
+                self.root.after_cancel(self.plate_overview_after_id)
+            except Exception:
+                pass
+        self.plate_overview_after_id = self.root.after(delay_ms, self._run_scheduled_plate_overview_update)
+
+    def _run_scheduled_plate_overview_update(self):
+        self.plate_overview_after_id = None
+        self.update_plate_overview()
+
     def _selected_labels_key(self):
         return tuple(self._selected_labels())
 
     def _schedule_autosave(self):
-        if self.autosave_after_id is not None:
-            try:
-                self.root.after_cancel(self.autosave_after_id)
-            except Exception:
-                pass
-        self.autosave_after_id = self.root.after(1500, self._write_autosave)
-        self.autosave_var.set("Autosave: pending")
+        self.autosave_var.set("Autosave: manual only")
 
     def _write_autosave(self):
         self.autosave_after_id = None
@@ -2286,10 +2594,13 @@ open "$TARGET_APP"
             selected_name = template_gates[0]["name"]
             self._refresh_gate_lists(selected_name=selected_name)
             self.redraw()
-            self._update_gate_summary_panel()
             self._refresh_heatmap_options()
-            self.update_heatmap()
-            self._mark_state_changed(f"Loaded gate template from {filename}")
+            self._mark_state_changed(
+                f"Loaded gate template from {filename}",
+                invalidate=True,
+                refresh_gate_summary=True,
+                refresh_heatmap=True,
+            )
         except Exception as exc:
             self.gate_status_var.set(f"Failed to load gate template: {type(exc).__name__}: {exc}")
 
@@ -2352,19 +2663,21 @@ open "$TARGET_APP"
         self.instrument_var.set(instrument)
         self._load_request_id += 1
         request_id = self._load_request_id
-        file_map, channel_names = self._scan_folder_contents(folder, instrument)
-        self._finish_load_folder(request_id, folder, file_map, channel_names, None)
+        file_map, channel_names, channel_names_by_label = self._scan_folder_contents(folder, instrument)
+        self._finish_load_folder(request_id, folder, file_map, channel_names, channel_names_by_label, None)
         self.gates = payload.get("gates", [])
         self.plate_metadata = payload.get("plate_metadata", {})
         self.dose_curve_definitions = payload.get("dose_curve_definitions", {})
         self._load_compensation_payload(payload.get("compensation", {}))
         self._invalidate_computation_cache()
+        self._refresh_well_listbox()
+        self._refresh_channel_controls()
         self._refresh_gate_lists()
-        self._update_gate_summary_panel()
+        self._schedule_gate_summary_update()
         self._refresh_heatmap_options()
         self.redraw()
         self.update_heatmap()
-        self.update_plate_overview()
+        self._schedule_plate_overview_update()
 
     def load_folder(self):
         folder = self.folder_var.get().strip()
@@ -2378,13 +2691,14 @@ open "$TARGET_APP"
         request_id = self._load_request_id
         instrument = self.instrument_var.get()
         self.status_var.set("Scanning folder and reading channels...")
+        self._set_busy(True, "Progress: scanning folder")
 
         def worker():
             try:
-                file_map, channel_names = self._scan_folder_contents(folder, instrument)
-                self.root.after(0, lambda: self._finish_load_folder(request_id, folder, file_map, channel_names, None))
+                file_map, channel_names, channel_names_by_label = self._scan_folder_contents(folder, instrument)
+                self.root.after(0, lambda: self._finish_load_folder(request_id, folder, file_map, channel_names, channel_names_by_label, None))
             except Exception as exc:
-                self.root.after(0, lambda: self._finish_load_folder(request_id, folder, None, None, exc))
+                self.root.after(0, lambda: self._finish_load_folder(request_id, folder, None, None, None, exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2395,26 +2709,38 @@ open "$TARGET_APP"
             well = _get_well_name(relpath, instrument)
             label = f"{well} | {relpath}"
             file_map[label] = relpath
+        channel_names_by_label = {}
         channel_names = []
         if file_map:
-            first_label = next(iter(file_map))
-            first_relpath = file_map[first_label]
-            datafile = os.path.join(folder, first_relpath)
-            well = _get_well_name(first_relpath, instrument)
             FCMeasurement = _flow_tools()["FCMeasurement"]
-            sample = FCMeasurement(ID=well, datafile=datafile)
-            channel_names = _get_channel_names(sample)
-        return file_map, channel_names
+            channel_lists = []
+            for label, relpath in file_map.items():
+                datafile = os.path.join(folder, relpath)
+                well = _get_well_name(relpath, instrument)
+                sample = FCMeasurement(ID=well, datafile=datafile)
+                sample_channels = _get_channel_names(sample)
+                channel_names_by_label[label] = sample_channels
+                channel_lists.append(sample_channels)
+            channel_names = self._union_channel_names(channel_lists)
+        return file_map, channel_names, channel_names_by_label
 
-    def _finish_load_folder(self, request_id, folder, file_map, channel_names, error):
+    def _finish_load_folder(self, request_id, folder, file_map, channel_names, channel_names_by_label, error):
         if request_id != self._load_request_id:
             return
+        self._set_busy(False)
         if error is not None:
             self.status_var.set(f"Load Folder failed: {type(error).__name__}: {error}")
             return
 
         self.file_map = file_map or {}
         self.sample_cache = {}
+        self.channel_names_by_label = channel_names_by_label or {}
+        self.channel_names_by_relpath = {
+            relpath: list(self.channel_names_by_label.get(label, []))
+            for label, relpath in self.file_map.items()
+        }
+        distinct_channel_sets = {tuple(channels) for channels in self.channel_names_by_label.values() if channels}
+        self.has_mixed_channels = len(distinct_channel_sets) > 1
         self.gates = []
         self.plate_metadata = {}
         self.dose_curve_definitions = {}
@@ -2423,53 +2749,33 @@ open "$TARGET_APP"
         self.pending_gate = None
         self._invalidate_computation_cache()
 
-        self.well_listbox.delete(0, tk.END)
-        for label in self.file_map:
-            self.well_listbox.insert(tk.END, label)
+        self._refresh_well_listbox(selected_labels=[])
 
         if self.file_map:
             self.well_listbox.selection_set(0)
             self.channel_names = channel_names or []
-            self.x_combo["values"] = self.channel_names
-            self.y_combo["values"] = list(self.channel_names) + ["Count"]
-            if self.channel_names:
-                self.x_var.set("FSC-A" if "FSC-A" in self.channel_names else self.channel_names[0])
-                if _is_count_axis(self.y_var.get()):
-                    self.y_var.set("Count")
-                elif "SSC-A" in self.channel_names:
-                    self.y_var.set("SSC-A")
-                elif len(self.channel_names) > 1:
-                    self.y_var.set(self.channel_names[1])
-                else:
-                    self.y_var.set("Count")
-            self.status_var.set(f"Loaded {len(self.file_map)} wells. Click Plot Population to load events.")
+            self._refresh_channel_controls()
+            status = f"Loaded {len(self.file_map)} wells. Click Plot Population to load events."
+            if self.has_mixed_channels:
+                status += " Mixed channel sets detected; channel menus use the union and gates skip wells missing required channels."
+            self.status_var.set(status)
         else:
             self.channel_names = []
+            self.channel_names_by_label = {}
+            self.channel_names_by_relpath = {}
+            self.has_mixed_channels = False
             self.x_combo["values"] = []
             self.y_combo["values"] = []
             self.status_var.set("No FCS files found in the selected folder.")
 
         self._refresh_gate_lists()
-        self._update_gate_summary_panel()
+        self._schedule_gate_summary_update()
         self._refresh_heatmap_options()
         self.clear_axes()
-        self.update_plate_overview()
+        self._schedule_plate_overview_update()
 
     def _prime_channels(self):
-        first_label = next(iter(self.file_map))
-        sample = self._load_sample(self.file_map[first_label])
-        self.channel_names = _get_channel_names(sample)
-        self.x_combo["values"] = self.channel_names
-        self.y_combo["values"] = list(self.channel_names) + ["Count"]
-        self.x_var.set("FSC-A" if "FSC-A" in self.channel_names else self.channel_names[0])
-        if _is_count_axis(self.y_var.get()):
-            self.y_var.set("Count")
-        elif "SSC-A" in self.channel_names:
-            self.y_var.set("SSC-A")
-        elif len(self.channel_names) > 1:
-            self.y_var.set(self.channel_names[1])
-        else:
-            self.y_var.set("Count")
+        self._refresh_channel_controls()
 
     def _load_sample(self, relpath):
         if relpath not in self.sample_cache:
@@ -2515,7 +2821,98 @@ open "$TARGET_APP"
         return df
 
     def _selected_labels(self):
-        return [self.well_listbox.get(i) for i in self.well_listbox.curselection()]
+        return [self._base_well_label(self.well_listbox.get(i)) for i in self.well_listbox.curselection()]
+
+    def _union_channel_names(self, channel_lists):
+        ordered = []
+        seen = set()
+        for channels in channel_lists:
+            for channel in channels:
+                if channel not in seen:
+                    seen.add(channel)
+                    ordered.append(channel)
+        return ordered
+
+    def _channels_for_label(self, label):
+        return list(self.channel_names_by_label.get(label, []))
+
+    def _channels_for_relpath(self, relpath):
+        return list(self.channel_names_by_relpath.get(relpath, []))
+
+    def _selected_channel_union(self):
+        labels = self._selected_labels()
+        if not labels:
+            return list(self.channel_names)
+        return self._union_channel_names(self._channels_for_label(label) for label in labels)
+
+    def _refresh_channel_controls(self):
+        available_channels = self._selected_channel_union()
+        self.x_combo["values"] = available_channels
+        self.y_combo["values"] = list(available_channels) + ["Count"]
+        if self.x_var.get() not in available_channels:
+            if available_channels:
+                self.x_var.set("FSC-A" if "FSC-A" in available_channels else available_channels[0])
+            else:
+                self.x_var.set("")
+        if _is_count_axis(self.y_var.get()):
+            self.y_var.set("Count")
+        elif self.y_var.get() not in available_channels:
+            if "SSC-A" in available_channels:
+                self.y_var.set("SSC-A")
+            elif len(available_channels) > 1:
+                self.y_var.set(available_channels[1])
+            elif available_channels:
+                self.y_var.set(available_channels[0])
+            else:
+                self.y_var.set("Count")
+        if self.has_mixed_channels:
+            availability = self._selected_channel_availability_message()
+            if availability:
+                self.channel_warning_var.set(f"Mixed channels: using channel union. {availability}")
+            else:
+                self.channel_warning_var.set("Mixed channels: channel menus show the union across selected wells. Gates skip wells missing required channels.")
+        else:
+            self.channel_warning_var.set("")
+
+    def _selected_channel_availability_message(self):
+        labels = self._selected_labels()
+        if not labels:
+            return ""
+        missing = []
+        channels_to_check = [self.x_var.get()]
+        if not (self.y_plot_mode_var.get() == "count histogram" or _is_count_axis(self.y_var.get())):
+            channels_to_check.append(self.y_var.get())
+        for label in labels:
+            available = set(self._channels_for_label(label))
+            missing_channels = [channel for channel in channels_to_check if channel and channel not in available]
+            if missing_channels:
+                missing.append(f"{label.split(' | ')[0]} missing {', '.join(missing_channels)}")
+        if not missing:
+            return ""
+        return " | ".join(missing[:4]) + (" | ..." if len(missing) > 4 else "")
+
+    def _plot_selection_title(self):
+        labels = self._selected_labels()
+        if not labels:
+            return ""
+        if len(labels) == 1:
+            well = labels[0].split(" | ")[0]
+            sample_name = str(self._metadata_for_well(well).get("sample_name", "")).strip()
+            return f"{well} | {sample_name}" if sample_name else well
+        wells = [label.split(" | ")[0] for label in labels]
+        if len(wells) <= 4:
+            return ", ".join(wells)
+        return f"{len(wells)} wells"
+
+    def _gate_required_channels(self, gate):
+        channels = {gate.get("x_channel")}
+        y_channel = _gate_plot_y_channel(gate)
+        if y_channel:
+            channels.add(y_channel)
+        return {channel for channel in channels if channel}
+
+    def _df_supports_gate(self, df, gate):
+        return all(channel in df.columns for channel in self._gate_required_channels(gate))
 
     def _included_file_items(self):
         items = []
@@ -2570,41 +2967,12 @@ open "$TARGET_APP"
         cached = self._population_raw_cache.get(cache_key)
         if cached is not None:
             return cached.copy()
-        df = self._selected_raw_dataframe()
-        if df.empty:
-            return df
-        if self._is_boolean_population(population_name):
-            parent_name, gate_names = self._boolean_population_spec(population_name)
-            df = self._population_raw_dataframe(parent_name)
-            for gate_name in gate_names:
-                gate = self._population_gate(gate_name)
-                if gate is None:
-                    continue
-                transformed = _apply_transform(
-                    df,
-                    gate["x_channel"],
-                    _gate_plot_y_channel(gate),
-                    self._gate_x_transform(gate),
-                    self._gate_x_cofactor(gate),
-                    y_method=self._gate_y_transform(gate),
-                    y_cofactor=self._gate_y_cofactor(gate),
-                )
-                mask = _gate_mask(transformed, gate)
-                df = df.loc[mask].copy()
-            self._population_raw_cache[cache_key] = df
-            return df.copy()
-        for gate in self._population_lineage(population_name):
-            transformed = _apply_transform(
-                df,
-                gate["x_channel"],
-                _gate_plot_y_channel(gate),
-                self._gate_x_transform(gate),
-                self._gate_x_cofactor(gate),
-                y_method=self._gate_y_transform(gate),
-                y_cofactor=self._gate_y_cofactor(gate),
-            )
-            mask = _gate_mask(transformed, gate)
-            df = df.loc[mask].copy()
+        frames = []
+        for label in self._selected_labels():
+            sample_df = self._sample_population_raw_dataframe(label, population_name)
+            if not sample_df.empty:
+                frames.append(sample_df)
+        df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         self._population_raw_cache[cache_key] = df
         return df.copy()
 
@@ -2623,6 +2991,8 @@ open "$TARGET_APP"
                 gate = self._population_gate(gate_name)
                 if gate is None:
                     continue
+                if not self._df_supports_gate(df, gate):
+                    continue
                 transformed = _apply_transform(
                     df,
                     gate["x_channel"],
@@ -2637,6 +3007,8 @@ open "$TARGET_APP"
             self._sample_population_cache[cache_key] = df
             return df.copy()
         for gate in self._population_lineage(population_name):
+            if not self._df_supports_gate(df, gate):
+                continue
             transformed = _apply_transform(
                 df,
                 gate["x_channel"],
@@ -2681,6 +3053,8 @@ open "$TARGET_APP"
         df = self._population_raw_dataframe(self._selected_population_name())
         if df.empty:
             return df, df
+        if self.x_var.get() not in df.columns:
+            raise ValueError(f"Selected X channel '{self.x_var.get()}' is not available in the current wells/population.")
         if self.y_plot_mode_var.get() == "count histogram" or _is_count_axis(self.y_var.get()):
             transformed = pd.DataFrame(index=df.index.copy())
             transformed[self.x_var.get()] = _transform_array(
@@ -2690,6 +3064,8 @@ open "$TARGET_APP"
             )
             transformed["__well__"] = df["__well__"].to_numpy()
         else:
+            if self.y_var.get() not in df.columns:
+                raise ValueError(f"Selected Y channel '{self.y_var.get()}' is not available in the current wells/population.")
             transformed = _apply_transform(
                 df,
                 self.x_var.get(),
@@ -2704,21 +3080,18 @@ open "$TARGET_APP"
         return df.copy(), transformed.copy()
 
     def _gate_fraction(self, gate_spec):
-        parent_df = self._population_raw_dataframe(gate_spec["parent_population"])
-        if parent_df.empty:
+        total = 0
+        count = 0
+        applicable = False
+        for label in self._selected_labels():
+            frac, label_count, label_total = self._gate_fraction_for_label(gate_spec, label)
+            if pd.isna(frac):
+                continue
+            applicable = True
+            total += label_total
+            count += label_count
+        if not applicable:
             return 0.0, 0, 0
-        transformed = _apply_transform(
-            parent_df,
-            gate_spec["x_channel"],
-            _gate_plot_y_channel(gate_spec),
-            self._gate_x_transform(gate_spec),
-            self._gate_x_cofactor(gate_spec),
-            y_method=self._gate_y_transform(gate_spec),
-            y_cofactor=self._gate_y_cofactor(gate_spec),
-        )
-        mask = _gate_mask(transformed, gate_spec)
-        count = int(mask.sum())
-        total = len(parent_df)
         return count / max(total, 1), count, total
 
     def _gate_fraction_for_label(self, gate_spec, label):
@@ -2726,6 +3099,8 @@ open "$TARGET_APP"
         parent_name = gate_spec["parent_population"]
         if parent_name != "__all__":
             for lineage_gate in self._population_lineage(parent_name):
+                if not self._df_supports_gate(df, lineage_gate):
+                    continue
                 transformed_parent = _apply_transform(
                     df,
                     lineage_gate["x_channel"],
@@ -2739,6 +3114,8 @@ open "$TARGET_APP"
                 df = df.loc[mask_parent].copy()
         if df.empty:
             return 0.0, 0, 0
+        if not self._df_supports_gate(df, gate_spec):
+            return np.nan, 0, len(df)
         transformed = _apply_transform(
             df,
             gate_spec["x_channel"],
@@ -2816,6 +3193,45 @@ open "$TARGET_APP"
             f"{100*frac:.1f}% of parent ({count}/{total})"
         )
 
+    def _clear_interaction_preview(self):
+        for artist in self.preview_artists:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        self.preview_artists = []
+
+    def _update_box_preview(self, start_point, current_point, color="#c77d2b"):
+        self._clear_interaction_preview()
+        if start_point is None:
+            self.canvas.draw_idle()
+            return
+        x0, y0 = start_point
+        start_artist = self.ax.scatter([x0], [y0], s=40, color=color, edgecolors="white", linewidths=0.8, zorder=6)
+        self.preview_artists.append(start_artist)
+        if current_point is not None:
+            x1, y1 = current_point
+            cursor_artist = self.ax.scatter([x1], [y1], s=28, color=color, alpha=0.85, zorder=6)
+            self.preview_artists.append(cursor_artist)
+            xmin, xmax = sorted((x0, x1))
+            ymin, ymax = sorted((y0, y1))
+            width = xmax - xmin
+            height = ymax - ymin
+            if width > 0 and height > 0:
+                rect_artist = Rectangle(
+                    (xmin, ymin),
+                    width,
+                    height,
+                    fill=False,
+                    edgecolor=color,
+                    linewidth=1.8,
+                    linestyle="--",
+                    zorder=5,
+                )
+                self.ax.add_patch(rect_artist)
+                self.preview_artists.append(rect_artist)
+        self.canvas.draw_idle()
+
     def _downsample(self, transformed):
         if transformed.empty:
             return transformed
@@ -2830,10 +3246,11 @@ open "$TARGET_APP"
 
     def clear_axes(self):
         self._disconnect_drawing()
+        self._clear_interaction_preview()
         self.ax.clear()
         self.ax.set_title("No population plotted")
         self.canvas.draw_idle()
-        self.update_heatmap()
+        self._schedule_heatmap_update()
 
     def _refresh_heatmap_options(self):
         metric_cols = [f"pct_{gate['name']}" for gate in self.gates]
@@ -2867,8 +3284,10 @@ open "$TARGET_APP"
         if not self.file_map:
             self.heatmap_ax.set_title("No data loaded")
             self.heatmap_canvas.draw_idle()
+            self.heatmap_status_var.set("Heatmap ready")
             return
         try:
+            self.heatmap_status_var.set("Updating heatmap...")
             plate = np.full((8, 12), np.nan)
             mode = self.heatmap_mode_var.get()
             if mode == "percent":
@@ -2876,11 +3295,13 @@ open "$TARGET_APP"
                 if not metric:
                     self.heatmap_ax.set_title("No % positive metric selected")
                     self.heatmap_canvas.draw_idle()
+                    self.heatmap_status_var.set("Heatmap ready")
                     return
                 summary = self._summary_dataframe()
                 if metric not in summary.columns:
                     self.heatmap_ax.set_title("Metric not available")
                     self.heatmap_canvas.draw_idle()
+                    self.heatmap_status_var.set("Heatmap ready")
                     return
                 for _, row in summary.iterrows():
                     well = row["well"]
@@ -2904,6 +3325,7 @@ open "$TARGET_APP"
                 if not channel:
                     self.heatmap_ax.set_title("No fluorescence channel selected")
                     self.heatmap_canvas.draw_idle()
+                    self.heatmap_status_var.set("Heatmap ready")
                     return
                 for label, relpath, well in self._included_file_items():
                     df = self._sample_population_raw_dataframe(label, population)
@@ -2928,10 +3350,12 @@ open "$TARGET_APP"
                 if not x_channel or not y_channel:
                     self.heatmap_ax.set_title("Select two fluorescence channels")
                     self.heatmap_canvas.draw_idle()
+                    self.heatmap_status_var.set("Heatmap ready")
                     return
                 if x_channel == y_channel:
                     self.heatmap_ax.set_title("Correlation requires two different channels")
                     self.heatmap_canvas.draw_idle()
+                    self.heatmap_status_var.set("Heatmap ready")
                     return
                 for label, relpath, well in self._included_file_items():
                     value = self._channel_correlation_for_label(label, population, x_channel, y_channel)
@@ -2958,9 +3382,11 @@ open "$TARGET_APP"
             _apply_prism_axis_style(self.heatmap_ax)
             self.heatmap_figure.tight_layout()
             self.heatmap_canvas.draw_idle()
+            self.heatmap_status_var.set("Heatmap ready")
         except Exception as exc:
             self.heatmap_ax.set_title(f"Heatmap failed: {type(exc).__name__}")
             self.heatmap_canvas.draw_idle()
+            self.heatmap_status_var.set("Heatmap update failed")
 
     def redraw(self):
         self.ax.clear()
@@ -2989,13 +3415,15 @@ open "$TARGET_APP"
                         label=well,
                         color=self.color_cycle[idx % len(self.color_cycle)],
                     )
-                self.ax.legend(fontsize=8)
+                if len(labels) <= 12:
+                    self.ax.legend(fontsize=8)
         elif len(labels) <= 1:
             self.ax.scatter(plotted[self.x_var.get()], plotted[self.y_var.get()], s=3, alpha=0.25, color=self.color_cycle[0], rasterized=True)
         else:
             for idx, (well, group) in enumerate(plotted.groupby("__well__", sort=False)):
                 self.ax.scatter(group[self.x_var.get()], group[self.y_var.get()], s=3, alpha=0.25, label=well, color=self.color_cycle[idx % len(self.color_cycle)], rasterized=True)
-            self.ax.legend(markerscale=3, fontsize=8)
+            if len(labels) <= 12:
+                self.ax.legend(markerscale=3, fontsize=8)
 
         selected_gate = self._selected_saved_gate_name()
         for gate in self.gates:
@@ -3019,8 +3447,9 @@ open "$TARGET_APP"
 
         population_name = self._selected_population_name()
         title_name = self._population_display_label(population_name)
+        selection_title = self._plot_selection_title()
         if histogram_mode:
-            hist_limits = self._median_histogram_axis_limits(transformed)
+            hist_limits = self._effective_histogram_axis_limits(transformed)
             if hist_limits is not None:
                 self.ax.set_xlim(hist_limits[0], hist_limits[1])
                 self.ax.set_ylim(hist_limits[2], hist_limits[3])
@@ -3031,23 +3460,38 @@ open "$TARGET_APP"
                 self.ax.set_ylim(scatter_limits[2], scatter_limits[3])
         self.ax.set_xlabel(f"{self.x_var.get()} ({self._plot_x_transform()})")
         self.ax.set_ylabel("Count" if histogram_mode else f"{self.y_var.get()} ({self._plot_y_transform()})")
-        self.ax.set_title(f"{title_name} | {len(raw_df)} events")
+        title_parts = [part for part in [selection_title, title_name, f"{len(raw_df)} events"] if part]
+        title = " | ".join(title_parts)
+        if len(labels) > 12:
+            title += " | legend hidden"
+        self.ax.set_title(title)
         _apply_prism_axis_style(self.ax)
         _apply_prism_legend_style(self.ax)
         self.figure.tight_layout()
         self.canvas.draw_idle()
+        if self.rectangle_start_point is not None:
+            self._update_box_preview(self.rectangle_start_point, self.rectangle_current_point, color="#2f8c74")
+        elif self.zoom_box_start_point is not None:
+            self._update_box_preview(self.zoom_box_start_point, self.zoom_box_current_point, color="#c77d2b")
 
     def plot_population(self):
         try:
             self.status_var.set("Loading events and plotting population...")
+            self._set_busy(True, "Progress: plotting selected wells")
             self._disconnect_drawing()
             raw_df, transformed = self._display_dataframe()
             self.current_data = raw_df
             self.current_transformed = transformed
             self.redraw()
-            self.status_var.set("Population plotted.")
+            availability_message = self._selected_channel_availability_message()
+            if availability_message:
+                self.status_var.set(f"Population plotted. Some wells are missing selected channels; missing-channel gates were skipped. {availability_message}")
+            else:
+                self.status_var.set("Population plotted.")
         except Exception as exc:
             self.status_var.set(f"Plot Population failed: {type(exc).__name__}: {exc}")
+        finally:
+            self._set_busy(False)
 
     def _pending_to_gate_spec(self, preview=False):
         if self.pending_gate is None:
@@ -3091,6 +3535,7 @@ open "$TARGET_APP"
             self.gate_status_var.set("Polygon mode active. Click vertices and double-click to finish.")
         elif gate_type == "rectangle":
             self.canvas_click_cid = self.canvas.mpl_connect("button_press_event", self._on_rectangle_click)
+            self.zoom_box_motion_cid = self.canvas.mpl_connect("motion_notify_event", self._on_rectangle_motion)
             self.mode_var.set("MODE: drawing rectangle gate")
             self.canvas.get_tk_widget().configure(cursor="crosshair")
             self.start_draw_button.configure(text="Drawing...")
@@ -3114,6 +3559,51 @@ open "$TARGET_APP"
             self.start_draw_button.configure(text="Drawing...")
             self.gate_status_var.set("Horizontal mode active. Click once to place the threshold.")
 
+    def start_zoom_box(self):
+        if self.current_transformed.empty:
+            self.gate_status_var.set("Plot a population before zooming.")
+            return
+        self._disconnect_drawing()
+        self.drag_state = None
+        self.zoom_box_start_point = None
+        self.zoom_box_current_point = None
+        self.canvas_click_cid = self.canvas.mpl_connect("button_press_event", self._on_zoom_box_click)
+        self.zoom_box_motion_cid = self.canvas.mpl_connect("motion_notify_event", self._on_zoom_box_motion)
+        self.mode_var.set("MODE: zoom box")
+        self.canvas.get_tk_widget().configure(cursor="crosshair")
+        self.gate_status_var.set("Zoom box mode active. Click one corner, then the opposite corner.")
+
+    def start_move_selected_gate(self):
+        if self.current_transformed.empty:
+            self.gate_status_var.set("Plot a population before moving a gate.")
+            return
+        gate = self._visible_gate_for_drag()
+        if gate is None:
+            self.gate_status_var.set("Select a visible saved gate first.")
+            return
+        if gate["gate_type"] not in {"polygon", "rectangle"}:
+            self.gate_status_var.set("Move Selected Gate currently supports polygon and rectangle gates.")
+            return
+        self._disconnect_drawing()
+        self.translate_gate_mode = True
+        self.mode_var.set(f"MODE: move selected gate {gate['name']}")
+        self.canvas.get_tk_widget().configure(cursor="fleur")
+        self.gate_status_var.set("Move mode active. Drag inside the selected gate to translate it as a whole.")
+
+    def reset_zoom(self):
+        scatter_x_key = self._scatter_x_axis_override_key()
+        scatter_y_key = self._scatter_y_axis_override_key()
+        hist_key = self._hist_axis_override_key()
+        if scatter_x_key in self.scatter_x_axis_overrides:
+            self.scatter_x_axis_overrides.pop(scatter_x_key, None)
+        if scatter_y_key in self.scatter_y_axis_overrides:
+            self.scatter_y_axis_overrides.pop(scatter_y_key, None)
+        if hist_key in self.hist_axis_overrides:
+            self.hist_axis_overrides.pop(hist_key, None)
+        if not self.current_transformed.empty:
+            self.redraw()
+        self.gate_status_var.set("Zoom reset to automatic limits.")
+
     def _on_polygon_complete(self, vertices):
         self.pending_gate = PendingGate("polygon", {"vertices": [tuple(v) for v in vertices]})
         self.gate_status_var.set("Polygon captured. Click Save Gate to keep it.")
@@ -3131,14 +3621,26 @@ open "$TARGET_APP"
         point = (float(event.xdata), float(event.ydata))
         if self.rectangle_start_point is None:
             self.rectangle_start_point = point
+            self.rectangle_current_point = point
             self.gate_status_var.set("Rectangle first corner set. Click the opposite corner to finish.")
+            self._update_box_preview(self.rectangle_start_point, self.rectangle_current_point, color="#2f8c74")
             return
         vertices = self._rectangle_vertices(self.rectangle_start_point[0], self.rectangle_start_point[1], point[0], point[1])
         self.pending_gate = PendingGate("rectangle", {"vertices": vertices})
         self.rectangle_start_point = None
+        self.rectangle_current_point = None
+        self._clear_interaction_preview()
         self.gate_status_var.set("Rectangle gate captured. Click Save Gate to keep it.")
         self._disconnect_drawing()
         self.redraw()
+
+    def _on_rectangle_motion(self, event):
+        if self.rectangle_start_point is None:
+            return
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        self.rectangle_current_point = (float(event.xdata), float(event.ydata))
+        self._update_box_preview(self.rectangle_start_point, self.rectangle_current_point, color="#2f8c74")
 
     def _on_quad_click(self, event):
         if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
@@ -3177,6 +3679,51 @@ open "$TARGET_APP"
         self._disconnect_drawing()
         self.redraw()
 
+    def _on_zoom_box_click(self, event):
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        point = (float(event.xdata), float(event.ydata))
+        if self.zoom_box_start_point is None:
+            self.zoom_box_start_point = point
+            self.zoom_box_current_point = point
+            self.gate_status_var.set("Zoom box first corner set. Click the opposite corner to zoom.")
+            self._update_box_preview(self.zoom_box_start_point, self.zoom_box_current_point, color="#c77d2b")
+            return
+        x0, y0 = self.zoom_box_start_point
+        x1, y1 = point
+        xmin, xmax = sorted((x0, x1))
+        ymin, ymax = sorted((y0, y1))
+        if np.isclose(xmin, xmax) or np.isclose(ymin, ymax):
+            self.gate_status_var.set("Zoom box corners must define a non-zero area.")
+            self.zoom_box_current_point = point
+            self._update_box_preview(self.zoom_box_start_point, self.zoom_box_current_point, color="#c77d2b")
+            return
+        if self.y_plot_mode_var.get() == "count histogram" or _is_count_axis(self.y_var.get()):
+            hist_key = self._hist_axis_override_key()
+            if hist_key is not None:
+                self.hist_axis_overrides[hist_key] = (xmin, xmax, ymin, ymax)
+        else:
+            scatter_x_key = self._scatter_x_axis_override_key()
+            scatter_y_key = self._scatter_y_axis_override_key()
+            if scatter_x_key is not None:
+                self.scatter_x_axis_overrides[scatter_x_key] = (xmin, xmax)
+            if scatter_y_key is not None:
+                self.scatter_y_axis_overrides[scatter_y_key] = (ymin, ymax)
+        self.zoom_box_start_point = None
+        self.zoom_box_current_point = None
+        self._clear_interaction_preview()
+        self.gate_status_var.set("Zoom box applied.")
+        self._disconnect_drawing()
+        self.redraw()
+
+    def _on_zoom_box_motion(self, event):
+        if self.zoom_box_start_point is None:
+            return
+        if event.inaxes != self.ax or event.xdata is None or event.ydata is None:
+            return
+        self.zoom_box_current_point = (float(event.xdata), float(event.ydata))
+        self._update_box_preview(self.zoom_box_start_point, self.zoom_box_current_point, color="#c77d2b")
+
     def _disconnect_drawing(self):
         if self.selector is not None:
             self.selector.disconnect_events()
@@ -3184,7 +3731,15 @@ open "$TARGET_APP"
         if self.canvas_click_cid is not None:
             self.canvas.mpl_disconnect(self.canvas_click_cid)
             self.canvas_click_cid = None
+        if self.zoom_box_motion_cid is not None:
+            self.canvas.mpl_disconnect(self.zoom_box_motion_cid)
+            self.zoom_box_motion_cid = None
         self.rectangle_start_point = None
+        self.rectangle_current_point = None
+        self.zoom_box_start_point = None
+        self.zoom_box_current_point = None
+        self.translate_gate_mode = False
+        self._clear_interaction_preview()
         self.mode_var.set("MODE: idle")
         self.canvas.get_tk_widget().configure(cursor="")
         self.start_draw_button.configure(text="Start Drawing")
@@ -3236,6 +3791,8 @@ open "$TARGET_APP"
             return None
         if gate["gate_type"] in {"polygon", "rectangle"}:
             vertices = np.asarray(gate["vertices"])
+            if self.translate_gate_mode and Path(vertices).contains_point((event.xdata, event.ydata)):
+                return {"mode": "polygon_translate"}
             distances = np.sqrt(((vertices - np.array([[event.xdata, event.ydata]])) ** 2).sum(axis=1))
             if distances.min() < 0.03 * max(self.ax.get_xlim()[1] - self.ax.get_xlim()[0], 1e-9):
                 return {"mode": "polygon_vertex", "vertex_index": int(distances.argmin())}
@@ -3257,17 +3814,28 @@ open "$TARGET_APP"
             "gate_name": gate["name"],
             "press_x": float(event.xdata),
             "press_y": float(event.ydata),
+            "press_event_x": float(event.x),
+            "press_event_y": float(event.y),
+            "active": False,
             "state_before_drag": self._state_snapshot(),
             "original": json.loads(json.dumps(gate)),
             "originals": [json.loads(json.dumps(g)) for g in self.gates if g.get("gate_group") == gate.get("gate_group")] if gate.get("gate_group") else [json.loads(json.dumps(gate))],
             **hit,
         }
-        self.mode_var.set(f"MODE: dragging gate {gate['name']}")
-        self.canvas.get_tk_widget().configure(cursor="fleur")
+        if self.translate_gate_mode:
+            self.mode_var.set(f"MODE: moving gate {gate['name']}")
 
     def _on_drag_motion(self, event):
         if self.drag_state is None or event.inaxes != self.ax or event.xdata is None or event.ydata is None:
             return
+        if not self.drag_state.get("active", False):
+            dx_px = float(event.x) - self.drag_state["press_event_x"]
+            dy_px = float(event.y) - self.drag_state["press_event_y"]
+            if (dx_px * dx_px + dy_px * dy_px) ** 0.5 <= 8:
+                return
+            self.drag_state["active"] = True
+            self.mode_var.set(f"MODE: dragging gate {self.drag_state['gate_name']}")
+            self.canvas.get_tk_widget().configure(cursor="fleur")
         gate = next((g for g in self.gates if g["name"] == self.drag_state["gate_name"]), None)
         if gate is None:
             return
@@ -3306,29 +3874,34 @@ open "$TARGET_APP"
     def _on_drag_release(self, _event):
         if self.drag_state is not None:
             gate_name = self.drag_state["gate_name"]
-            changed = any(
-                current != original
-                for current, original in zip(
-                    [g for g in self.gates if g.get("gate_group") == next((x.get("gate_group") for x in self.gates if x["name"] == gate_name), None)] or [next((g for g in self.gates if g["name"] == gate_name), {})],
-                    self.drag_state.get("originals", [self.drag_state.get("original", {})]),
+            changed = False
+            translate_mode_active = self.translate_gate_mode
+            if self.drag_state.get("active", False):
+                changed = any(
+                    current != original
+                    for current, original in zip(
+                        [g for g in self.gates if g.get("gate_group") == next((x.get("gate_group") for x in self.gates if x["name"] == gate_name), None)] or [next((g for g in self.gates if g["name"] == gate_name), {})],
+                        self.drag_state.get("originals", [self.drag_state.get("original", {})]),
+                    )
                 )
-            )
             if changed:
                 self.undo_stack.append(self.drag_state["state_before_drag"])
                 if len(self.undo_stack) > self.history_limit:
                     self.undo_stack = self.undo_stack[-self.history_limit:]
             self.drag_state = None
+            if translate_mode_active:
+                self.translate_gate_mode = False
             self.mode_var.set("MODE: idle")
             self.canvas.get_tk_widget().configure(cursor="")
             if changed:
                 self._invalidate_computation_cache()
-            self._update_gate_summary_panel()
+            self._schedule_gate_summary_update()
             if changed:
                 self.redo_stack.clear()
-                self._schedule_autosave()
-            self.gate_status_var.set(f"Moved gate '{gate_name}'.")
+            if changed:
+                self.gate_status_var.set(f"Moved gate '{gate_name}'.")
             self._refresh_heatmap_options()
-            self.update_heatmap()
+            self._schedule_heatmap_update()
 
     def clear_pending(self):
         self.pending_gate = None
@@ -3369,14 +3942,18 @@ open "$TARGET_APP"
         self._refresh_gate_lists(selected_name=selected_name)
         self.gate_name_var.set(f"gate_{len(self.gates) + 1}")
         self.redraw()
-        self._update_gate_summary_panel()
         self._refresh_heatmap_options()
-        self.update_heatmap()
+        self._schedule_gate_summary_update()
         summaries = []
         for gate in specs_to_add:
             frac, count, total = self._gate_fraction(gate)
             summaries.append(f"{gate['name']}: {100*frac:.1f}% ({count}/{total})")
-        self._mark_state_changed("Saved " + "; ".join(summaries))
+        self._mark_state_changed(
+            "Saved " + "; ".join(summaries),
+            invalidate=True,
+            refresh_gate_summary=True,
+            refresh_heatmap=True,
+        )
 
     def _selected_saved_gate_name(self):
         sel = self.saved_gate_listbox.curselection()
@@ -3389,12 +3966,12 @@ open "$TARGET_APP"
         gate_name = self._selected_saved_gate_name()
         if not gate_name:
             self.redraw()
-            self._update_gate_summary_panel()
+            self._schedule_gate_summary_update()
             return
         gate = next((g for g in self.gates if g["name"] == gate_name), None)
         if gate is None:
             self.redraw()
-            self._update_gate_summary_panel()
+            self._schedule_gate_summary_update()
             return
         if gate["x_channel"] in self.channel_names:
             self.x_var.set(gate["x_channel"])
@@ -3410,7 +3987,7 @@ open "$TARGET_APP"
         else:
             self.population_var.set("All Events")
         self.plot_population()
-        self._update_gate_summary_panel()
+        self._schedule_gate_summary_update()
 
     def delete_gate(self):
         gate_name = self._selected_saved_gate_name()
@@ -3427,10 +4004,13 @@ open "$TARGET_APP"
             self.population_var.set("All Events")
         self._refresh_gate_lists()
         self.redraw()
-        self._update_gate_summary_panel()
         self._refresh_heatmap_options()
-        self.update_heatmap()
-        self._mark_state_changed(f"Deleted gate '{gate_name}'.")
+        self._mark_state_changed(
+            f"Deleted gate '{gate_name}'.",
+            invalidate=True,
+            refresh_gate_summary=True,
+            refresh_heatmap=True,
+        )
 
     def _refresh_gate_lists(self, selected_name=None):
         labels = []
@@ -3531,10 +4111,13 @@ open "$TARGET_APP"
         selected_name = next(iter(new_names.values()))
         self._refresh_gate_lists(selected_name=selected_name)
         self.redraw()
-        self._update_gate_summary_panel()
         self._refresh_heatmap_options()
-        self.update_heatmap()
-        self._mark_state_changed(f"Renamed gate to {selected_name}.")
+        self._mark_state_changed(
+            f"Renamed gate to {selected_name}.",
+            invalidate=True,
+            refresh_gate_summary=True,
+            refresh_heatmap=True,
+        )
 
     def recolor_selected_gate(self):
         gate_name = self._selected_saved_gate_name()
@@ -3554,8 +4137,8 @@ open "$TARGET_APP"
             g["color"] = chosen[1]
         self.redraw()
         self._refresh_gate_lists(selected_name=gate_name)
-        self._update_gate_summary_panel()
-        self._mark_state_changed(f"Updated gate color for {gate_name}.")
+        self._schedule_gate_summary_update()
+        self._mark_state_changed(f"Updated gate color for {gate_name}.", refresh_gate_summary=True, refresh_heatmap=False)
 
     def copy_gate_names(self):
         names = "\n".join(gate["name"] for gate in self.gates)
@@ -3629,6 +4212,8 @@ open "$TARGET_APP"
             for gate in self.gates:
                 gated_df = df.copy()
                 for lineage_gate in self._population_lineage(gate["name"]):
+                    if not self._df_supports_gate(gated_df, lineage_gate):
+                        continue
                     transformed = _apply_transform(
                         gated_df,
                         lineage_gate["x_channel"],

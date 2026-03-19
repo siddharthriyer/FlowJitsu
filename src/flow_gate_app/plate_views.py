@@ -29,7 +29,8 @@ def open_plate_map_editor(self):
     top_dose_var = tk.DoubleVar(value=50.0)
     dilution_var = tk.DoubleVar(value=2.0)
     info_var = tk.StringVar(value="Click or drag across wells to select them. Hold Shift or Control to add discontinuous groups.")
-    drag_rect = {"id": None, "start": None}
+    drag_rect = {"id": None, "start": None, "active": False}
+    drag_threshold = 8
     well_items = {}
     row_names = "ABCDEFGH"
 
@@ -132,25 +133,33 @@ def open_plate_map_editor(self):
 
     def on_canvas_press(event):
         drag_rect["start"] = (event.x, event.y)
+        drag_rect["active"] = False
         if drag_rect["id"] is not None:
             canvas.delete(drag_rect["id"])
-        drag_rect["id"] = canvas.create_rectangle(event.x, event.y, event.x, event.y, dash=(4, 2), outline="#3366cc")
+            drag_rect["id"] = None
 
     def on_canvas_drag(event):
-        if drag_rect["id"] is None or drag_rect["start"] is None:
+        if drag_rect["start"] is None:
             return
         x0, y0 = drag_rect["start"]
+        moved = abs(event.x - x0) + abs(event.y - y0)
+        if not drag_rect["active"]:
+            if moved <= drag_threshold:
+                return
+            drag_rect["id"] = canvas.create_rectangle(x0, y0, x0, y0, dash=(4, 2), outline="#3366cc")
+            drag_rect["active"] = True
         canvas.coords(drag_rect["id"], x0, y0, event.x, event.y)
 
     def on_canvas_release(event):
         if drag_rect["start"] is None:
             return
         x0, y0 = drag_rect["start"]
-        moved = abs(event.x - x0) + abs(event.y - y0) > 8
+        moved = drag_rect["active"] and (abs(event.x - x0) + abs(event.y - y0) > drag_threshold)
         if drag_rect["id"] is not None:
             canvas.delete(drag_rect["id"])
             drag_rect["id"] = None
         drag_rect["start"] = None
+        drag_rect["active"] = False
         if moved:
             hits = wells_in_bbox(x0, y0, event.x, event.y)
             if not _event_adds_to_selection(event):
@@ -544,7 +553,8 @@ def open_exclusion_editor(self):
     selected_wells = set()
     available_wells = {_get_well_name(relpath, self.instrument_var.get()) for relpath in self.file_map.values()}
     info_var = tk.StringVar(value="Select wells to exclude. Hold Shift or Control to add discontinuous groups.")
-    drag_rect = {"id": None, "start": None}
+    drag_rect = {"id": None, "start": None, "active": False}
+    drag_threshold = 8
     well_items = {}
     row_names = "ABCDEFGH"
 
@@ -587,25 +597,33 @@ def open_exclusion_editor(self):
 
     def on_canvas_press(event):
         drag_rect["start"] = (event.x, event.y)
+        drag_rect["active"] = False
         if drag_rect["id"] is not None:
             canvas.delete(drag_rect["id"])
-        drag_rect["id"] = canvas.create_rectangle(event.x, event.y, event.x, event.y, dash=(4, 2), outline="#3366cc")
+            drag_rect["id"] = None
 
     def on_canvas_drag(event):
-        if drag_rect["id"] is None or drag_rect["start"] is None:
+        if drag_rect["start"] is None:
             return
         x0, y0 = drag_rect["start"]
+        moved = abs(event.x - x0) + abs(event.y - y0)
+        if not drag_rect["active"]:
+            if moved <= drag_threshold:
+                return
+            drag_rect["id"] = canvas.create_rectangle(x0, y0, x0, y0, dash=(4, 2), outline="#3366cc")
+            drag_rect["active"] = True
         canvas.coords(drag_rect["id"], x0, y0, event.x, event.y)
 
     def on_canvas_release(event):
         if drag_rect["start"] is None:
             return
         x0, y0 = drag_rect["start"]
-        moved = abs(event.x - x0) + abs(event.y - y0) > 8
+        moved = drag_rect["active"] and (abs(event.x - x0) + abs(event.y - y0) > drag_threshold)
         if drag_rect["id"] is not None:
             canvas.delete(drag_rect["id"])
             drag_rect["id"] = None
         drag_rect["start"] = None
+        drag_rect["active"] = False
         if moved:
             hits = wells_in_bbox(x0, y0, event.x, event.y)
             if not _event_adds_to_selection(event):
