@@ -2,9 +2,6 @@ import os
 import sys
 import traceback
 
-from flow_gate_app.flow_desktop_ui import launch_desktop_app
-
-
 def _startup_log_path():
     if getattr(sys, "frozen", False):
         base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "FlowJitsu")
@@ -16,7 +13,15 @@ def _startup_log_path():
 
 if __name__ == "__main__":
     try:
-        launch_desktop_app()
+        use_qt = "--ui=qt" in sys.argv or os.environ.get("FLOWJITSU_UI", "").strip().lower() == "qt"
+        if use_qt:
+            from flow_gate_app.flow_desktop_ui_qt import launch_desktop_app_qt
+
+            launch_desktop_app_qt()
+        else:
+            from flow_gate_app.flow_desktop_ui import launch_desktop_app
+
+            launch_desktop_app()
     except Exception:
         with open(_startup_log_path(), "w") as fh:
             fh.write(traceback.format_exc())

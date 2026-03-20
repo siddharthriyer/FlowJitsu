@@ -16,6 +16,12 @@ FlowJitsu is a plate-oriented flow cytometry analysis app for:
 - saving reusable sessions and gate templates
 - checking for app updates
 
+This release includes both the legacy Tk desktop app and the newer Qt desktop app.
+
+- launch the Tk app with `python -m flow_gate_app`
+- launch the Qt app with `python -m flow_gate_app --ui=qt`
+- the Qt app is the active migration path and now includes plotting, gating, plate-map editing, compensation, analysis preview, exports, and update checking
+
 ## Main Workflow
 
 The typical workflow is:
@@ -58,11 +64,16 @@ Compensation support:
 - open the compensation editor from the `Compensation` button
 - enable or disable compensation
 - paste a square labeled spillover matrix
-- load a matrix from file
 - auto-detect compensation from FCS metadata when present
-- match compensation source channels to app channels
-- preview before/after compensation on a scatterplot
+- automatically map compensation source channels onto loaded channels when possible
 - persist compensation in saved sessions
+
+Qt compensation behavior:
+
+- supports pasted matrices and SPILL or SPILLOVER metadata detection
+- stores the active compensation matrix inside the session
+- applies compensation before downstream plotting and gating
+- currently relies on automatic channel mapping rather than a full manual mapping editor
 
 Compensation metadata detection currently looks for:
 
@@ -96,6 +107,7 @@ The `Plot` panel supports:
 - viewing a mixed-channel warning banner when selected wells do not all share the same channels
 - seeing the selected well name in the plot title
 - seeing the assigned sample name in the plot title when one selected well has metadata
+- keeping the interactive plot square
 
 Supported transforms:
 
@@ -108,15 +120,16 @@ Scatter axis limit behavior:
 - auto-limits are shared across all loaded FCS files
 - per-file limits are based on robust quantiles rather than absolute extremes
 - shared limits use median per-file bounds
-- manual overrides can be applied with sliders
+- manual overrides can be applied with both text entry and sliders
 - manual overrides can be reset back to automatic limits
 
 Histogram axis limit behavior:
 
-- histogram X and Y limits are controlled with sliders in the `Histogram` tab of `Graph Options`
+- histogram X and Y limits are controlled with both text entry and sliders in the `Histogram` tab of `Graph Options`
 - histogram slider ranges use the full extent across all loaded FCS files
 - histogram X max extends to the maximum transformed channel value across all files plus padding
 - histogram Y max extends to the maximum histogram count across all files plus padding
+- histogram Y auto-scaling follows the data currently being plotted while X remains channel-shared
 - `Apply` keeps the window open
 - `Use Auto` resets only the active plot-type limits and keeps the window open
 
@@ -153,6 +166,8 @@ Gating features:
 - translate full rectangle gates
 - move quad intersections
 - move vertical and horizontal thresholds
+- show vertical thresholds on any plot whose X axis matches the threshold channel
+- switch to histogram view automatically when selecting a vertical threshold gate
 - cancel active drawing or zoom mode with `Esc`
 - use the visible mode banner to confirm whether the app is idle, drawing, dragging, or zooming
 - scroll saved gates, gate percentages, and gate statistics panels when content is long
@@ -162,9 +177,11 @@ Gate behavior:
 - gates are defined in the transformed coordinate system
 - gates are attached to a parent population
 - child populations can be gated recursively
+- selecting a saved gate shows its parent population underneath the selected gate
 - saved-gate heatmaps update when gates move
 - gate statistics update from the selected gate
 - drawing and dragging only begin after real pointer movement, which improves reliability on older trackpads
+- polygon drawing shows large vertex markers and can be closed by clicking near the first vertex, double-clicking, or right-clicking
 
 Gate organization:
 
@@ -210,6 +227,9 @@ Plate features:
 - inspect well metadata in the editor
 - preview the plate layout in the main window
 - see excluded wells marked in the main well list
+- use a drag-selectable plate table in the Qt editor
+- manage samples from the editor with sample create, extend, and delete actions
+- see richer well tooltips including sample type, dose, replicate, direction, exclusion state, and FCS availability
 
 Dose curve defaults:
 
@@ -245,6 +265,7 @@ Heatmap controls include:
 - custom heatmap title
 - save heatmap to file
 - a local heatmap status indicator
+- centered heatmap display in the Qt layout
 
 Heatmap behavior:
 
@@ -253,6 +274,8 @@ Heatmap behavior:
 - updates after plate metadata changes that affect analysis
 - updates are slightly deferred after gate edits to reduce UI stalls
 - shows `Updating heatmap...` near the heatmap controls while a refresh is running
+- keeps annotation text readable by using light text on dark cells and dark text on light cells
+- does not change just because a different saved gate is selected
 
 ## Plate Overview
 
@@ -275,6 +298,7 @@ The `Analysis Preview` window provides downstream plot previews and styling cont
 Plot types:
 
 - `bar`
+- `line`
 - `distribution`
 - `correlation`
 
@@ -284,6 +308,7 @@ Layout features:
 - scrollable right-side sample palette panel
 - live Matplotlib preview
 - toolbar for navigation and saving
+- dose-aware defaults for line plots when dose metadata is available
 
 ### Bar Mode
 
@@ -294,10 +319,22 @@ Bar mode supports:
 - choosing bar hue grouping
 - GraphPad Prism-like styling
 - capped error bars
+- overlaid replicate dots
 - configurable bar fill color
 - configurable bar outline width
 - configurable axis line width
 - configurable legend border width
+
+### Line Mode
+
+Line mode supports:
+
+- choosing the `% positive` column
+- using dose-aware X groupings
+- plotting replicate means with SD error bars
+- overlaying replicate dots
+- log or linear X scale
+- log or linear Y scale
 
 Bar normalization metrics:
 
@@ -357,6 +394,7 @@ The palette panel supports:
 - moving selected samples between groups
 - resetting grouping
 - using seaborn or matplotlib palette names
+- applying palette groups to sample-colored bar and line plots
 
 Groups available:
 
@@ -384,9 +422,9 @@ The `Analysis And Export` section supports:
 - exporting an HTML report
 - creating a Jupyter notebook
 - opening Plate Map
-- opening Excluded Wells editor
 - exporting summary CSV
 - exporting intensities CSV
+- exporting plate metadata CSV
 
 Generated analysis files can include:
 
@@ -412,8 +450,6 @@ Notebook generation behavior:
 
 The `Session` section supports:
 
-- undo
-- redo
 - save session
 - load session
 - open recent session
@@ -428,7 +464,8 @@ Session behavior:
 - stores dose-curve definitions
 - stores compensation settings
 - maintains a last-session file
-- supports autosave state tracking
+- prompts to save on close in the Qt app
+- auto-loads the last session in the Qt app
 
 ## Updates
 
@@ -440,23 +477,7 @@ Updater features:
 - compares release version with local app version
 - reports when the app is already current
 - opens the release page when useful
-- downloads packaged release assets
-
-macOS updater behavior:
-
-- can download the release zip
-- can replace the app bundle in place
-- can relaunch the updated app
-
-Windows updater behavior:
-
-- downloads the packaged app
-- supports extraction
-- currently expects manual replacement after download
-
-Downloaded updates are stored in:
-
-- `~/Downloads/FlowJitsuUpdates/`
+- the Qt app currently opens the release page when an update is found
 
 ## Styling
 
@@ -492,7 +513,7 @@ This location is used for:
 Current limitations to be aware of:
 
 - drag and drop requires `tkinterdnd2`
-- automatic in-place updating is stronger on macOS than Windows
+- the Qt compensation editor currently depends on automatic channel mapping
 - compensation requires a valid labeled spillover matrix when not auto-detected
 - gates are drawn in transformed coordinates, so changing transforms changes how a gate lines up visually unless the gate was created under the same transform settings
 - mixed-channel experiments are supported, but gates and plots can only use channels present in each individual well

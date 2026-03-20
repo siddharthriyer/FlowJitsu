@@ -24,6 +24,7 @@ pyinstaller \
   --name FlowJitsu \
   --paths "${SCRIPT_DIR}/src" \
   --hidden-import tkinter \
+  --collect-all PySide6 \
   --collect-submodules FlowCytometryTools \
   --collect-submodules flow_gate_app \
   "${SCRIPT_DIR}/src/flow_gate_app/__main__.py"
