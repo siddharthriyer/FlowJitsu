@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
+from matplotlib.path import Path
 from matplotlib.patches import Rectangle
 from matplotlib.widgets import PolygonSelector
 import tkinter as tk
@@ -163,9 +164,11 @@ class FlowDesktopApp:
 
         self.file_map = {}
         self.sample_cache = {}
+        self._sample_raw_cache = {}
         self._selected_raw_cache = {}
         self._population_raw_cache = {}
         self._sample_population_cache = {}
+        self._sample_population_transform_cache = {}
         self._display_cache = {}
         self._summary_cache = None
         self._intensity_cache = None
@@ -1290,15 +1293,15 @@ class FlowDesktopApp:
 
     def _apply_compensation(self, df):
         if not self.compensation_enabled.get() or self.compensation_matrix is None or not self.compensation_channels:
-            return df
+            return df.copy(deep=False)
         channels = [channel for channel in self.compensation_channels if channel in df.columns]
         if len(channels) != len(self.compensation_channels):
-            return df
+            return df.copy(deep=False)
         try:
             inverse = np.linalg.pinv(self.compensation_matrix)
         except Exception as exc:
             self.status_var.set(f"Compensation failed: {type(exc).__name__}: {exc}")
-            return df
+            return df.copy(deep=False)
         compensated = df.copy()
         values = compensated[channels].to_numpy(dtype=float)
         compensated_values = values @ inverse.T
@@ -1555,14 +1558,9 @@ class FlowDesktopApp:
         population_name = self._selected_population_name()
         for label in self.file_map:
             try:
-                group = self._sample_population_raw_dataframe(label, population_name)
-            except Exception:
-                continue
-            if group.empty:
-                continue
-            try:
-                transformed_group = _apply_transform(
-                    group,
+                transformed_group = self._sample_population_transformed_dataframe(
+                    label,
+                    population_name,
                     x_channel,
                     y_channel,
                     self._plot_x_transform(),
@@ -1617,14 +1615,9 @@ class FlowDesktopApp:
         population_name = self._selected_population_name()
         for label in self.file_map:
             try:
-                group = self._sample_population_raw_dataframe(label, population_name)
-            except Exception:
-                continue
-            if group.empty:
-                continue
-            try:
-                transformed_group = _apply_transform(
-                    group,
+                transformed_group = self._sample_population_transformed_dataframe(
+                    label,
+                    population_name,
                     x_channel,
                     y_channel,
                     self._plot_x_transform(),
@@ -2400,9 +2393,11 @@ open "$TARGET_APP"
             self._schedule_heatmap_update()
 
     def _invalidate_computation_cache(self):
+        self._sample_raw_cache.clear()
         self._selected_raw_cache.clear()
         self._population_raw_cache.clear()
         self._sample_population_cache.clear()
+        self._sample_population_transform_cache.clear()
         self._display_cache.clear()
         self._summary_cache = None
         self._intensity_cache = None
@@ -2812,13 +2807,17 @@ open "$TARGET_APP"
         return fluorescent
 
     def _sample_raw_dataframe(self, label):
+        cached = self._sample_raw_cache.get(label)
+        if cached is not None:
+            return cached.copy(deep=False)
         relpath = self.file_map[label]
         sample = self._load_sample(relpath)
-        df = self._apply_compensation(sample.data.copy())
+        df = self._apply_compensation(sample.data)
         well = _get_well_name(relpath, self.instrument_var.get())
         df["__well__"] = well
         df["__source__"] = relpath
-        return df
+        self._sample_raw_cache[label] = df
+        return df.copy(deep=False)
 
     def _selected_labels(self):
         return [self._base_well_label(self.well_listbox.get(i)) for i in self.well_listbox.curselection()]
@@ -2929,19 +2928,15 @@ open "$TARGET_APP"
         cache_key = tuple(labels)
         cached = self._selected_raw_cache.get(cache_key)
         if cached is not None:
-            return cached.copy()
+            return cached.copy(deep=False)
         frames = []
         for idx, label in enumerate(labels):
-            relpath = self.file_map[label]
-            sample = self._load_sample(relpath)
-            df = self._apply_compensation(sample.data.copy())
-            df["__well__"] = _get_well_name(relpath, self.instrument_var.get())
-            df["__source__"] = relpath
+            df = self._sample_raw_dataframe(label)
             df["__sample_idx__"] = idx
             frames.append(df)
         combined = pd.concat(frames, ignore_index=True)
         self._selected_raw_cache[cache_key] = combined
-        return combined.copy()
+        return combined.copy(deep=False)
 
     def _population_gate(self, name):
         if name == "__all__":
@@ -2966,7 +2961,7 @@ open "$TARGET_APP"
         cache_key = (self._selected_labels_key(), population_name)
         cached = self._population_raw_cache.get(cache_key)
         if cached is not None:
-            return cached.copy()
+            return cached.copy(deep=False)
         frames = []
         for label in self._selected_labels():
             sample_df = self._sample_population_raw_dataframe(label, population_name)
@@ -2974,16 +2969,16 @@ open "$TARGET_APP"
                 frames.append(sample_df)
         df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         self._population_raw_cache[cache_key] = df
-        return df.copy()
+        return df.copy(deep=False)
 
     def _sample_population_raw_dataframe(self, label, population_name):
         cache_key = (label, population_name)
         cached = self._sample_population_cache.get(cache_key)
         if cached is not None:
-            return cached.copy()
+            return cached.copy(deep=False)
         df = self._sample_raw_dataframe(label)
         if df.empty:
-            return df
+            return df.copy(deep=False)
         if self._is_boolean_population(population_name):
             parent_name, gate_names = self._boolean_population_spec(population_name)
             df = self._sample_population_raw_dataframe(label, parent_name)
@@ -3005,7 +3000,7 @@ open "$TARGET_APP"
                 mask = _gate_mask(transformed, gate)
                 df = df.loc[mask].copy()
             self._sample_population_cache[cache_key] = df
-            return df.copy()
+            return df.copy(deep=False)
         for gate in self._population_lineage(population_name):
             if not self._df_supports_gate(df, gate):
                 continue
@@ -3021,7 +3016,48 @@ open "$TARGET_APP"
             mask = _gate_mask(transformed, gate)
             df = df.loc[mask].copy()
         self._sample_population_cache[cache_key] = df
-        return df.copy()
+        return df.copy(deep=False)
+
+    def _sample_population_transformed_dataframe(
+        self,
+        label,
+        population_name,
+        x_channel,
+        y_channel,
+        x_method,
+        x_cofactor,
+        y_method=None,
+        y_cofactor=None,
+    ):
+        cache_key = (
+            label,
+            population_name,
+            x_channel,
+            y_channel,
+            x_method,
+            float(x_cofactor),
+            y_method,
+            None if y_cofactor is None else float(y_cofactor),
+        )
+        cached = self._sample_population_transform_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy(deep=False)
+        df = self._sample_population_raw_dataframe(label, population_name)
+        if df.empty:
+            return df.copy(deep=False)
+        transformed = _apply_transform(
+            df,
+            x_channel,
+            y_channel,
+            x_method,
+            x_cofactor,
+            y_method=y_method,
+            y_cofactor=y_cofactor,
+        )
+        if "__well__" in df.columns and "__well__" not in transformed.columns:
+            transformed["__well__"] = df["__well__"].to_numpy()
+        self._sample_population_transform_cache[cache_key] = transformed
+        return transformed.copy(deep=False)
 
     def _channel_correlation_for_label(self, label, population_name, x_channel, y_channel):
         df = self._sample_population_raw_dataframe(label, population_name)
@@ -3048,7 +3084,7 @@ open "$TARGET_APP"
         cached = self._display_cache.get(cache_key)
         if cached is not None:
             raw_df, transformed = cached
-            return raw_df.copy(), transformed.copy()
+            return raw_df.copy(deep=False), transformed.copy(deep=False)
 
         df = self._population_raw_dataframe(self._selected_population_name())
         if df.empty:
@@ -3077,7 +3113,7 @@ open "$TARGET_APP"
             )
             transformed["__well__"] = df["__well__"].to_numpy()
         self._display_cache[cache_key] = (df, transformed)
-        return df.copy(), transformed.copy()
+        return df.copy(deep=False), transformed.copy(deep=False)
 
     def _gate_fraction(self, gate_spec):
         total = 0
@@ -3179,7 +3215,6 @@ open "$TARGET_APP"
         self.gate_stats_text.configure(state="disabled")
 
     def _gate_label(self, gate):
-        frac, count, total = self._gate_fraction(gate)
         hierarchy = self._population_display_label(gate["name"])
         if gate["gate_type"] == "vertical":
             axes_label = f"vertical @ {gate['x_channel']}"
@@ -3188,10 +3223,7 @@ open "$TARGET_APP"
         else:
             y_channel = gate["y_channel"] if gate.get("y_channel") else gate["x_channel"]
             axes_label = f"{gate['x_channel']} vs {y_channel}"
-        return (
-            f"{hierarchy} | {axes_label} | "
-            f"{100*frac:.1f}% of parent ({count}/{total})"
-        )
+        return f"{hierarchy} | {axes_label}"
 
     def _clear_interaction_preview(self):
         for artist in self.preview_artists:

@@ -94,6 +94,8 @@ The `Plot` panel supports:
 - drawing a `Zoom Box`
 - resetting plot limits with `Reset Zoom`
 - viewing a mixed-channel warning banner when selected wells do not all share the same channels
+- seeing the selected well name in the plot title
+- seeing the assigned sample name in the plot title when one selected well has metadata
 
 Supported transforms:
 
@@ -145,8 +147,10 @@ Gating features:
 - recolor gates
 - delete gates
 - drag saved gates directly on the plot
+- move the selected polygon or rectangle gate with `Move Selected Gate`
 - move polygon vertices
 - translate full polygons
+- translate full rectangle gates
 - move quad intersections
 - move vertical and horizontal thresholds
 - cancel active drawing or zoom mode with `Esc`
@@ -165,6 +169,7 @@ Gate behavior:
 Gate organization:
 
 - gates are shown in the saved-gate list
+- saved-gate list entries emphasize lineage and channels rather than recomputing percentages for every refresh
 - hierarchical population labels are displayed as lineage paths
 - threshold gate pairs are grouped together
 - boolean populations are generated for compatible sibling fluorescence gates
@@ -239,6 +244,7 @@ Heatmap controls include:
 - second channel selection for correlation mode
 - custom heatmap title
 - save heatmap to file
+- a local heatmap status indicator
 
 Heatmap behavior:
 
@@ -246,6 +252,7 @@ Heatmap behavior:
 - updates after saving, deleting, renaming, or moving gates
 - updates after plate metadata changes that affect analysis
 - updates are slightly deferred after gate edits to reduce UI stalls
+- shows `Updating heatmap...` near the heatmap controls while a refresh is running
 
 ## Plate Overview
 
