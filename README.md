@@ -10,7 +10,24 @@ It is designed for plate-based `.fcs` workflows where you want to:
 - preview bar plots, distributions, and correlations
 - export summary tables for follow-up analysis
 
-## Run The App
+## Install The App
+
+The simplest way to install FlowJitsu is from the latest GitHub release:
+
+1. open the latest release page
+2. download the packaged app for your platform
+3. unzip it
+4. launch the app directly
+
+Release assets:
+
+- `FlowJitsu-macos-arm64.zip` for Apple Silicon Macs
+- `FlowJitsu-macos-intel.zip` for Intel Macs
+- `FlowJitsu-windows.zip` for Windows
+
+If you prefer running from Python instead of the packaged app, use one of the options below.
+
+## Run From Python
 
 If the Python version is installed into the lab conda environment:
 
@@ -26,7 +43,13 @@ cd "/Users/siddharthiyer/MIT Dropbox/Siddharth Iyer/Church Lab/Viral RNA Deliver
 PYTHONPATH=src python -m flow_gate_app
 ```
 
-## Install
+To force the legacy Tk UI instead of the default Qt UI:
+
+```bash
+PYTHONPATH=src python -m flow_gate_app --ui=tk
+```
+
+## Install Into Conda
 
 From the `flow_gate_app` folder:
 
@@ -63,14 +86,7 @@ When the bundled app runs, it stores sessions, exports, and generated notebooks 
 ## Updating
 
 Inside the app, use `Check for Updates` to look for the latest GitHub release.
-
-Downloaded update files are saved to:
-
-```text
-~/Downloads/FlowJitsuUpdates/
-```
-
-On macOS, the app can download and replace the app bundle for you. On Windows, it downloads the packaged app and you replace the folder manually.
+The Qt app currently opens the release page when a newer version is available.
 
 ## What The App Exports
 

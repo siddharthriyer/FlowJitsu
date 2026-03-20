@@ -44,7 +44,17 @@ jobs:
           path: dist/*
 
   build-macos-app:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            artifact_name: macos-app-arm64
+            zip_name: FlowJitsu-macos-arm64.zip
+          - runner: macos-15-intel
+            artifact_name: macos-app-intel
+            zip_name: FlowJitsu-macos-intel.zip
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         working-directory: .
@@ -79,13 +89,13 @@ jobs:
             "${{ github.workspace }}/src/flow_gate_app/__main__.py"
 
       - name: Zip app bundle
-        run: ditto -c -k --sequesterRsrc --keepParent "dist/FlowJitsu.app" "dist/FlowJitsu-macos.zip"
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/FlowJitsu.app" "dist/${{ matrix.zip_name }}"
 
       - name: Upload macOS app artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-app
-          path: dist/FlowJitsu-macos.zip
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.zip_name }}
 
   build-windows-app:
     runs-on: windows-latest
@@ -144,10 +154,16 @@ jobs:
           name: python-dist
           path: dist
 
-      - name: Download macOS artifact
+      - name: Download macOS arm64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: macos-app
+          name: macos-app-arm64
+          path: dist
+
+      - name: Download macOS Intel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-app-intel
           path: dist
 
       - name: Download Windows artifact

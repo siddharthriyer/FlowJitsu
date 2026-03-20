@@ -22,6 +22,7 @@ This release includes both the legacy Tk desktop app and the newer Qt desktop ap
 - launch the Tk app with `python -m flow_gate_app --ui=tk`
 - the default desktop entrypoint now launches the Qt app
 - the Qt app is the active migration path and now includes plotting, gating, plate-map editing, compensation, analysis preview, exports, and update checking
+- GitHub releases now publish separate mac app bundles for Apple Silicon and Intel Macs
 
 ## Main Workflow
 
@@ -479,6 +480,11 @@ Updater features:
 - reports when the app is already current
 - opens the release page when useful
 - the Qt app currently opens the release page when an update is found
+
+macOS release assets:
+
+- `FlowJitsu-macos-arm64.zip` for Apple Silicon Macs
+- `FlowJitsu-macos-intel.zip` for Intel Macs
 
 ## Styling
 
