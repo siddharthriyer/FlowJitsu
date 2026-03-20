@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flow-gate-app"
-version = "0.1.11"
+version = "0.1.12"
 description = "Desktop flow cytometry gating and plate annotation app"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,7 +22,8 @@ dependencies = [
 ]
 
 [project.scripts]
-flow-gate-desktop = "flow_gate_app.flow_desktop_ui:launch_desktop_app"
+flow-gate-desktop = "flow_gate_app.flow_desktop_ui_qt:launch_desktop_app_qt"
+flow-gate-desktop-tk = "flow_gate_app.flow_desktop_ui:launch_desktop_app"
 flow-gate-desktop-qt = "flow_gate_app.flow_desktop_ui_qt:launch_desktop_app_qt"
 
 [tool.setuptools]

@@ -18,8 +18,9 @@ FlowJitsu is a plate-oriented flow cytometry analysis app for:
 
 This release includes both the legacy Tk desktop app and the newer Qt desktop app.
 
-- launch the Tk app with `python -m flow_gate_app`
-- launch the Qt app with `python -m flow_gate_app --ui=qt`
+- launch the Qt app with `python -m flow_gate_app`
+- launch the Tk app with `python -m flow_gate_app --ui=tk`
+- the default desktop entrypoint now launches the Qt app
 - the Qt app is the active migration path and now includes plotting, gating, plate-map editing, compensation, analysis preview, exports, and update checking
 
 ## Main Workflow

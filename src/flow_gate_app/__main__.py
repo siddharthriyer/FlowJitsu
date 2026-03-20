@@ -13,15 +13,16 @@ def _startup_log_path():
 
 if __name__ == "__main__":
     try:
-        use_qt = "--ui=qt" in sys.argv or os.environ.get("FLOWJITSU_UI", "").strip().lower() == "qt"
-        if use_qt:
-            from flow_gate_app.flow_desktop_ui_qt import launch_desktop_app_qt
-
-            launch_desktop_app_qt()
-        else:
+        ui_choice = os.environ.get("FLOWJITSU_UI", "").strip().lower()
+        use_tk = "--ui=tk" in sys.argv or ui_choice == "tk"
+        if use_tk:
             from flow_gate_app.flow_desktop_ui import launch_desktop_app
 
             launch_desktop_app()
+        else:
+            from flow_gate_app.flow_desktop_ui_qt import launch_desktop_app_qt
+
+            launch_desktop_app_qt()
     except Exception:
         with open(_startup_log_path(), "w") as fh:
             fh.write(traceback.format_exc())
