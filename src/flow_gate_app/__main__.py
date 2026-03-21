@@ -20,9 +20,9 @@ if __name__ == "__main__":
 
             launch_desktop_app()
         else:
-            from flow_gate_app.flow_desktop_ui_qt import launch_desktop_app_qt
+            from flow_gate_app.v2 import launch_desktop_app_v2
 
-            launch_desktop_app_qt()
+            launch_desktop_app_v2()
     except Exception:
         with open(_startup_log_path(), "w") as fh:
             fh.write(traceback.format_exc())

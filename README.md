@@ -29,17 +29,16 @@ If you prefer running from Python instead of the packaged app, use one of the op
 
 ## Run From Python
 
-If the Python version is installed into the lab conda environment:
+If you have installed the package into a Python environment:
 
 ```bash
-conda activate biocompute-vscode-min
 flow-gate-desktop
 ```
 
 If you are running from source without installing:
 
 ```bash
-cd "/Users/siddharthiyer/MIT Dropbox/Siddharth Iyer/Church Lab/Viral RNA Delivery/Data/Flow/flow_gate_app"
+cd /path/to/flow_gate_app
 PYTHONPATH=src python -m flow_gate_app
 ```
 
@@ -54,13 +53,15 @@ PYTHONPATH=src python -m flow_gate_app --ui=tk
 From the `flow_gate_app` folder:
 
 ```bash
-./install_flow_gate_app.sh
+conda create -n flowjitsu python=3.10 -y
+conda activate flowjitsu
+python -m pip install -e .
 ```
 
-If you want to install into a different conda environment:
+Or install into an existing environment:
 
 ```bash
-./install_flow_gate_app.sh my-env-name
+python -m pip install -e .
 ```
 
 ## Standalone macOS App
