@@ -39,6 +39,11 @@ The typical workflow is:
 9. open analysis preview
 10. export reports or CSVs
 
+Session save behavior:
+
+- if you opened a session `.json` file, `Save` overwrites that same file by default
+- if the app only auto-loaded the recovery session, `Save` still asks you where to write a real session file
+
 ## Data Loading
 
 The `Data` panel supports:
@@ -368,7 +373,8 @@ Distribution mode supports:
 - selecting an intensity channel
 - optional gate filter
 - distribution hue grouping
-- violin plots instead of KDE
+- violin plots instead of histogram traces
+- overlaid jittered event points
 - log-scaled fluorescence axis
 
 ### Correlation Mode

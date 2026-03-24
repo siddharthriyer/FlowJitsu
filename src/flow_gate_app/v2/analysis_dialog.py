@@ -56,8 +56,88 @@ class AnalysisPreviewDialog(QDialog):
         self._build_ui()
         self.redraw()
 
+    def _register_control(self, key, label_widget, input_widget):
+        self._control_widgets[key] = (label_widget, input_widget)
+
+    def _update_mode_control_visibility(self):
+        mode = self.mode_combo.currentText()
+        visible = {
+            "bar": {
+                "pct",
+                "x_axis",
+                "hue",
+                "normalization",
+                "control_group",
+                "negative_control",
+                "positive_control",
+                "plot_title",
+                "x_title",
+                "y_title",
+                "x_min",
+                "x_max",
+                "y_min",
+                "y_max",
+                "x_scale",
+                "y_scale",
+                "redraw",
+            },
+            "line": {
+                "pct",
+                "x_axis",
+                "hue",
+                "normalization",
+                "control_group",
+                "negative_control",
+                "positive_control",
+                "plot_title",
+                "x_title",
+                "y_title",
+                "x_min",
+                "x_max",
+                "y_min",
+                "y_max",
+                "x_scale",
+                "y_scale",
+                "redraw",
+            },
+            "distribution": {
+                "channel",
+                "gate_filter",
+                "dist_hue",
+                "plot_title",
+                "x_title",
+                "y_title",
+                "y_min",
+                "y_max",
+                "y_scale",
+                "redraw",
+            },
+            "correlation": {
+                "x_axis",
+                "hue",
+                "channel",
+                "gate_filter",
+                "corr_y",
+                "plot_title",
+                "x_title",
+                "y_title",
+                "x_min",
+                "x_max",
+                "y_min",
+                "y_max",
+                "x_scale",
+                "y_scale",
+                "redraw",
+            },
+        }.get(mode, set())
+        for key, widgets in self._control_widgets.items():
+            is_visible = key in visible
+            for widget in widgets:
+                widget.setVisible(is_visible)
+
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        self._control_widgets = {}
 
         controls = QGridLayout()
         layout.addLayout(controls)
@@ -70,128 +150,172 @@ class AnalysisPreviewDialog(QDialog):
         hue_values = [""] + [col for col in ["sample_name", "replicate", "dose_curve"] if col in self.summary.columns or col in self.intensity.columns]
         dist_hue_values = [""] + [col for col in ["sample_name", "well", "dose_curve"] if col in self.intensity.columns]
 
-        controls.addWidget(QLabel("Mode"), 0, 0)
+        mode_label = QLabel("Mode")
+        controls.addWidget(mode_label, 0, 0)
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["bar", "line", "distribution", "correlation"])
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         controls.addWidget(self.mode_combo, 1, 0)
 
-        controls.addWidget(QLabel("% Column"), 0, 1)
+        pct_label = QLabel("% Column")
+        controls.addWidget(pct_label, 0, 1)
         self.pct_combo = QComboBox()
         self.pct_combo.addItems(pct_cols)
         self.pct_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.pct_combo, 1, 1)
+        self._register_control("pct", pct_label, self.pct_combo)
 
-        controls.addWidget(QLabel("Bar X"), 0, 2)
+        x_axis_label = QLabel("Bar X")
+        controls.addWidget(x_axis_label, 0, 2)
         self.x_axis_combo = QComboBox()
         self.x_axis_combo.addItems(x_axis_values)
         self.x_axis_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.x_axis_combo, 1, 2)
+        self._register_control("x_axis", x_axis_label, self.x_axis_combo)
 
-        controls.addWidget(QLabel("Hue"), 0, 3)
+        hue_label = QLabel("Hue")
+        controls.addWidget(hue_label, 0, 3)
         self.hue_combo = QComboBox()
         self.hue_combo.addItems(hue_values)
         self.hue_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.hue_combo, 1, 3)
+        self._register_control("hue", hue_label, self.hue_combo)
 
-        controls.addWidget(QLabel("Channel"), 0, 4)
+        channel_label = QLabel("Channel")
+        controls.addWidget(channel_label, 0, 4)
         self.channel_combo = QComboBox()
         self.channel_combo.addItems(channel_cols)
         self.channel_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.channel_combo, 1, 4)
+        self._register_control("channel", channel_label, self.channel_combo)
 
-        controls.addWidget(QLabel("Gate Filter"), 0, 5)
+        gate_filter_label = QLabel("Gate Filter")
+        controls.addWidget(gate_filter_label, 0, 5)
         self.gate_filter_combo = QComboBox()
         self.gate_filter_combo.addItems([""] + bool_cols)
         self.gate_filter_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.gate_filter_combo, 1, 5)
+        self._register_control("gate_filter", gate_filter_label, self.gate_filter_combo)
 
-        controls.addWidget(QLabel("Dist Hue"), 0, 6)
+        dist_hue_label = QLabel("Dist Hue")
+        controls.addWidget(dist_hue_label, 0, 6)
         self.hue_dist_combo = QComboBox()
         self.hue_dist_combo.addItems(dist_hue_values)
         self.hue_dist_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.hue_dist_combo, 1, 6)
+        self._register_control("dist_hue", dist_hue_label, self.hue_dist_combo)
 
-        controls.addWidget(QLabel("Correlation Y"), 0, 7)
+        corr_y_label = QLabel("Correlation Y")
+        controls.addWidget(corr_y_label, 0, 7)
         self.corr_y_combo = QComboBox()
         self.corr_y_combo.addItems(channel_cols)
         if len(channel_cols) > 1:
             self.corr_y_combo.setCurrentIndex(1)
         self.corr_y_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.corr_y_combo, 1, 7)
+        self._register_control("corr_y", corr_y_label, self.corr_y_combo)
 
-        controls.addWidget(QLabel("Bar Metric"), 2, 0)
+        normalization_label = QLabel("Bar Metric")
+        controls.addWidget(normalization_label, 2, 0)
         self.normalization_combo = QComboBox()
         self.normalization_combo.addItems(["raw_percent", "delta_vs_negative", "fold_vs_negative", "percent_of_positive", "minmax_neg_to_pos"])
         self.normalization_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.normalization_combo, 3, 0)
+        self._register_control("normalization", normalization_label, self.normalization_combo)
 
-        controls.addWidget(QLabel("Control Compare"), 2, 1)
+        control_group_label = QLabel("Control Compare")
+        controls.addWidget(control_group_label, 2, 1)
         self.control_group_combo = QComboBox()
         self.control_group_combo.addItems(["global", "x_axis", "sample_name", "dose_curve", "treatment_group", "replicate", "well"])
         self.control_group_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.control_group_combo, 3, 1)
+        self._register_control("control_group", control_group_label, self.control_group_combo)
 
-        controls.addWidget(QLabel("Negative Label"), 2, 2)
+        negative_control_label = QLabel("Negative Label")
+        controls.addWidget(negative_control_label, 2, 2)
         self.negative_control_edit = QLineEdit("negative_control")
         self.negative_control_edit.editingFinished.connect(self.redraw)
         controls.addWidget(self.negative_control_edit, 3, 2)
+        self._register_control("negative_control", negative_control_label, self.negative_control_edit)
 
-        controls.addWidget(QLabel("Positive Label"), 2, 3)
+        positive_control_label = QLabel("Positive Label")
+        controls.addWidget(positive_control_label, 2, 3)
         self.positive_control_edit = QLineEdit("positive_control")
         self.positive_control_edit.editingFinished.connect(self.redraw)
         controls.addWidget(self.positive_control_edit, 3, 3)
+        self._register_control("positive_control", positive_control_label, self.positive_control_edit)
 
-        controls.addWidget(QLabel("Plot Title"), 2, 4)
+        plot_title_label = QLabel("Plot Title")
+        controls.addWidget(plot_title_label, 2, 4)
         self.plot_title_edit = QLineEdit("")
         self.plot_title_edit.editingFinished.connect(self.redraw)
         controls.addWidget(self.plot_title_edit, 3, 4)
+        self._register_control("plot_title", plot_title_label, self.plot_title_edit)
 
-        controls.addWidget(QLabel("X Title"), 2, 5)
+        x_title_label = QLabel("X Title")
+        controls.addWidget(x_title_label, 2, 5)
         self.x_title_edit = QLineEdit("")
         self.x_title_edit.editingFinished.connect(self.redraw)
         controls.addWidget(self.x_title_edit, 3, 5)
+        self._register_control("x_title", x_title_label, self.x_title_edit)
 
-        controls.addWidget(QLabel("Y Title"), 2, 6)
+        y_title_label = QLabel("Y Title")
+        controls.addWidget(y_title_label, 2, 6)
         self.y_title_edit = QLineEdit("")
         self.y_title_edit.editingFinished.connect(self.redraw)
         controls.addWidget(self.y_title_edit, 3, 6)
+        self._register_control("y_title", y_title_label, self.y_title_edit)
 
-        controls.addWidget(QLabel("X Min"), 4, 0)
+        x_min_label = QLabel("X Min")
+        controls.addWidget(x_min_label, 4, 0)
         self.x_min_edit = QLineEdit("")
         self.x_min_edit.editingFinished.connect(self.redraw)
         controls.addWidget(self.x_min_edit, 5, 0)
+        self._register_control("x_min", x_min_label, self.x_min_edit)
 
-        controls.addWidget(QLabel("X Max"), 4, 1)
+        x_max_label = QLabel("X Max")
+        controls.addWidget(x_max_label, 4, 1)
         self.x_max_edit = QLineEdit("")
         self.x_max_edit.editingFinished.connect(self.redraw)
         controls.addWidget(self.x_max_edit, 5, 1)
+        self._register_control("x_max", x_max_label, self.x_max_edit)
 
-        controls.addWidget(QLabel("Y Min"), 4, 2)
+        y_min_label = QLabel("Y Min")
+        controls.addWidget(y_min_label, 4, 2)
         self.y_min_edit = QLineEdit("")
         self.y_min_edit.editingFinished.connect(self.redraw)
         controls.addWidget(self.y_min_edit, 5, 2)
+        self._register_control("y_min", y_min_label, self.y_min_edit)
 
-        controls.addWidget(QLabel("Y Max"), 4, 3)
+        y_max_label = QLabel("Y Max")
+        controls.addWidget(y_max_label, 4, 3)
         self.y_max_edit = QLineEdit("")
         self.y_max_edit.editingFinished.connect(self.redraw)
         controls.addWidget(self.y_max_edit, 5, 3)
+        self._register_control("y_max", y_max_label, self.y_max_edit)
 
-        controls.addWidget(QLabel("X Scale"), 4, 4)
+        x_scale_label = QLabel("X Scale")
+        controls.addWidget(x_scale_label, 4, 4)
         self.x_scale_combo = QComboBox()
         self.x_scale_combo.addItems(["linear", "log"])
         self.x_scale_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.x_scale_combo, 5, 4)
+        self._register_control("x_scale", x_scale_label, self.x_scale_combo)
 
-        controls.addWidget(QLabel("Y Scale"), 4, 5)
+        y_scale_label = QLabel("Y Scale")
+        controls.addWidget(y_scale_label, 4, 5)
         self.y_scale_combo = QComboBox()
         self.y_scale_combo.addItems(["linear", "log"])
         self.y_scale_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.y_scale_combo, 5, 5)
+        self._register_control("y_scale", y_scale_label, self.y_scale_combo)
 
         self.redraw_button = QPushButton("Redraw")
         self.redraw_button.clicked.connect(self.redraw)
         controls.addWidget(self.redraw_button, 5, 7)
+        redraw_label = QLabel("")
+        controls.addWidget(redraw_label, 4, 7)
+        self._register_control("redraw", redraw_label, self.redraw_button)
 
         body = QHBoxLayout()
         layout.addLayout(body, stretch=1)
@@ -253,6 +377,7 @@ class AnalysisPreviewDialog(QDialog):
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+        self._update_mode_control_visibility()
 
     def _on_mode_changed(self):
         if self.mode_combo.currentText() == "line":
@@ -262,6 +387,7 @@ class AnalysisPreviewDialog(QDialog):
             hue_values = [self.hue_combo.itemText(idx) for idx in range(self.hue_combo.count())]
             if "sample_name" in hue_values:
                 self.hue_combo.setCurrentText("sample_name")
+        self._update_mode_control_visibility()
         self.redraw()
 
     def _apply_prism_axis_style(self):
@@ -386,28 +512,59 @@ class AnalysisPreviewDialog(QDialog):
         title = "" if not normalized.empty else f"No matching controls found for {descriptions.get(mode, mode)}"
         return normalized, out_col, ylabel, title
 
-    def _apply_plot_formatting(self, default_title="", default_xlabel="", default_ylabel=""):
+    def _apply_plot_formatting(
+        self,
+        default_title="",
+        default_xlabel="",
+        default_ylabel="",
+        apply_x_scale=True,
+        apply_y_scale=True,
+        apply_x_limits=True,
+        apply_y_limits=True,
+    ):
         title = self.plot_title_edit.text().strip() or default_title
         x_title = self.x_title_edit.text().strip() or default_xlabel
         y_title = self.y_title_edit.text().strip() or default_ylabel
         self.ax.set_title(title)
         self.ax.set_xlabel(x_title)
         self.ax.set_ylabel(y_title)
-        self.ax.set_xscale(self.x_scale_combo.currentText())
-        self.ax.set_yscale(self.y_scale_combo.currentText())
+        if apply_x_scale:
+            self.ax.set_xscale(self.x_scale_combo.currentText())
+        if apply_y_scale:
+            self.ax.set_yscale(self.y_scale_combo.currentText())
         try:
             xmin = self._parse_limit(self.x_min_edit.text())
             xmax = self._parse_limit(self.x_max_edit.text())
-            if xmin is not None and xmax is not None and xmin < xmax:
+            if apply_x_limits and xmin is not None and xmax is not None and xmin < xmax:
                 self.ax.set_xlim(xmin, xmax)
+        except Exception:
+            pass
+        try:
+            ymin = self._parse_limit(self.y_min_edit.text())
+            ymax = self._parse_limit(self.y_max_edit.text())
+            if apply_y_limits and ymin is not None and ymax is not None and ymin < ymax:
+                self.ax.set_ylim(ymin, ymax)
         except Exception:
             pass
 
     def _series_color(self, idx):
         return plt_col(idx)
 
+    def _is_numeric_axis_column(self, dataframe, column):
+        if not column or column not in dataframe.columns:
+            return False
+        series = dataframe[column]
+        if pd.api.types.is_numeric_dtype(series):
+            return True
+        numeric = pd.to_numeric(series, errors="coerce")
+        return bool(numeric.notna().all()) and not numeric.empty
+
     def _barplot_with_error(self, plot_df, xcol, ycol, huecol=None):
         palette = self._palette_for_hue(huecol)
+        if xcol == "sample_name" and "sample_name" in plot_df.columns:
+            plot_df = plot_df.copy()
+            plot_df["sample_name"] = plot_df["sample_name"].astype(str).str.strip()
+            plot_df = plot_df[plot_df["sample_name"] != ""]
         if huecol and huecol in plot_df.columns:
             grouped = plot_df.groupby([xcol, huecol], dropna=False)[ycol].agg(["mean", "std"]).reset_index()
             x_labels = list(pd.Index(grouped[xcol].astype(str).unique()))
@@ -507,13 +664,63 @@ class AnalysisPreviewDialog(QDialog):
         for _, row in plot_df.iterrows():
             x_val = float(row[xcol]) if xcol == "dose" else str(row[xcol])
             self.ax.scatter(x_val, float(row[ycol]), s=18, color="#4f7cff", alpha=0.45, zorder=2)
-        try:
-            ymin = self._parse_limit(self.y_min_edit.text())
-            ymax = self._parse_limit(self.y_max_edit.text())
-            if ymin is not None and ymax is not None and ymin < ymax:
-                self.ax.set_ylim(ymin, ymax)
-        except Exception:
-            pass
+    def _violin_distribution_plot(self, plot_df, channel, huecol=None):
+        palette = self._palette_for_hue("sample_name" if huecol == "sample_name" else None)
+        datasets = []
+        labels = []
+        colors = []
+        if huecol and huecol in plot_df.columns:
+            for idx, (name, group) in enumerate(plot_df.groupby(huecol, dropna=False)):
+                values = pd.to_numeric(group[channel], errors="coerce").dropna()
+                values = values[values > 0].to_numpy()
+                if len(values) == 0:
+                    continue
+                label = str(name)
+                datasets.append(values)
+                labels.append(label)
+                colors.append(palette.get(label, self._series_color(idx)) if palette else self._series_color(idx))
+        else:
+            values = pd.to_numeric(plot_df[channel], errors="coerce").dropna()
+            values = values[values > 0].to_numpy()
+            if len(values) > 0:
+                datasets.append(values)
+                labels.append("All")
+                colors.append("#4f7cff")
+        if not datasets:
+            self.ax.set_title("No intensity data available after filtering")
+            return
+
+        positions = np.arange(1, len(datasets) + 1, dtype=float)
+        parts = self.ax.violinplot(datasets, positions=positions, widths=0.8, showmeans=False, showmedians=True, showextrema=False)
+        for idx, body in enumerate(parts["bodies"]):
+            body.set_facecolor(colors[idx])
+            body.set_edgecolor("#111111")
+            body.set_linewidth(1.4)
+            body.set_alpha(0.45)
+        if "cmedians" in parts:
+            parts["cmedians"].set_color("#111111")
+            parts["cmedians"].set_linewidth(1.5)
+
+        legend_handles = []
+        for idx, values in enumerate(datasets):
+            rng = np.random.RandomState(abs(hash((labels[idx], channel, len(values)))) % (2**32))
+            sample = values if len(values) <= 250 else rng.choice(values, size=250, replace=False)
+            jitter = (rng.rand(len(sample)) - 0.5) * 0.18
+            self.ax.scatter(
+                np.full(len(sample), positions[idx]) + jitter,
+                sample,
+                s=10,
+                color=colors[idx],
+                alpha=0.28,
+                edgecolors="none",
+                zorder=3,
+            )
+            legend_handles.append(self.ax.scatter([], [], s=28, color=colors[idx], label=labels[idx]))
+
+        self.ax.set_xticks(positions)
+        self.ax.set_xticklabels(labels, rotation=45, ha="right")
+        if huecol and len(labels) > 1:
+            self.ax.legend(handles=legend_handles, fontsize=8)
 
     def redraw(self):
         self.ax.clear()
@@ -526,7 +733,13 @@ class AnalysisPreviewDialog(QDialog):
                 else:
                     xcol = self.x_axis_combo.currentText() or "well"
                     huecol = self.hue_combo.currentText().strip() or None
+                    if huecol == xcol:
+                        huecol = None
                     plot_df = self.summary.copy()
+                    if "sample_name" in plot_df.columns:
+                        plot_df["sample_name"] = plot_df["sample_name"].astype(str).str.strip()
+                        if xcol == "sample_name" or huecol == "sample_name":
+                            plot_df = plot_df[plot_df["sample_name"] != ""].copy()
                     plot_df = plot_df.dropna(subset=[xcol, pct_col])
                     plot_df, ycol, ylabel, normalization_title = self._normalized_bar_dataframe(plot_df, pct_col, xcol)
                     if plot_df.empty:
@@ -540,6 +753,8 @@ class AnalysisPreviewDialog(QDialog):
                             default_title=normalization_title or pct_col.replace("pct_", ""),
                             default_xlabel=xcol,
                             default_ylabel=ylabel,
+                            apply_x_scale=self._is_numeric_axis_column(plot_df, xcol),
+                            apply_x_limits=self._is_numeric_axis_column(plot_df, xcol),
                         )
                     else:
                         self._barplot_with_error(plot_df, xcol, ycol, huecol=huecol)
@@ -547,6 +762,8 @@ class AnalysisPreviewDialog(QDialog):
                             default_title=normalization_title or pct_col.replace("pct_", ""),
                             default_xlabel=xcol,
                             default_ylabel=ylabel,
+                            apply_x_scale=self._is_numeric_axis_column(plot_df, xcol),
+                            apply_x_limits=self._is_numeric_axis_column(plot_df, xcol),
                         )
             elif mode == "distribution":
                 channel = self.channel_combo.currentText()
@@ -561,17 +778,13 @@ class AnalysisPreviewDialog(QDialog):
                     plot_df = plot_df.dropna(subset=[channel])
                     plot_df = plot_df[plot_df[channel] > 0]
                     huecol = self.hue_dist_combo.currentText().strip()
-                    if huecol and huecol in plot_df.columns:
-                        for name, group in plot_df.groupby(huecol, dropna=False):
-                            self.ax.hist(group[channel], bins=80, histtype="step", linewidth=1.8, label=str(name))
-                        self.ax.legend(fontsize=8)
-                    else:
-                        self.ax.hist(plot_df[channel], bins=80, histtype="step", linewidth=1.8, color="#4f7cff")
-                    self.ax.set_xscale("log")
+                    self._violin_distribution_plot(plot_df, channel, huecol=huecol)
                     self._apply_plot_formatting(
                         default_title="Fluorescence distribution",
-                        default_xlabel=channel,
-                        default_ylabel="Count",
+                        default_xlabel=huecol or "Group",
+                        default_ylabel=channel,
+                        apply_x_scale=False,
+                        apply_x_limits=False,
                     )
             else:
                 channel_x = self.channel_combo.currentText()
@@ -588,6 +801,8 @@ class AnalysisPreviewDialog(QDialog):
                     plot_df = plot_df.dropna(subset=[channel_x, channel_y])
                     xcol = self.x_axis_combo.currentText() or "sample_name"
                     huecol = self.hue_combo.currentText().strip() or None
+                    if huecol == xcol:
+                        huecol = None
                     group_cols = [col for col in [xcol, huecol] if col and col in plot_df.columns]
                     corr_rows = []
                     for key, group in plot_df.groupby(group_cols or ["well"], dropna=False):
@@ -627,6 +842,8 @@ class AnalysisPreviewDialog(QDialog):
                         default_title=f"Correlation: {channel_x} vs {channel_y}",
                         default_xlabel=xcol,
                         default_ylabel="correlation",
+                        apply_x_scale=self._is_numeric_axis_column(corr_df, xcol),
+                        apply_x_limits=self._is_numeric_axis_column(corr_df, xcol),
                     )
                     self.ax.set_ylim(-1.05, 1.05)
             self._apply_prism_axis_style()

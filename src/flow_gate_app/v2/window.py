@@ -257,6 +257,7 @@ class FlowDesktopQtWindow(QMainWindow):
         self._plot_timer = QTimer(self)
         self._plot_timer.setSingleShot(True)
         self._plot_timer.timeout.connect(self.plot_population)
+        self.current_session_path = None
 
         self.setWindowTitle(f"{APP_BRAND} v{__version__} [Qt Preview]")
         self.resize(1640, 940)

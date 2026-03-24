@@ -120,20 +120,23 @@ def apply_session_payload(window, payload):
 
 
 def save_session(window):
-    filename, _ = QFileDialog.getSaveFileName(
-        window,
-        "Save Session",
-        os.path.join(session_dir(window), "flow_session.json"),
-        "JSON files (*.json)",
-    )
+    filename = window.current_session_path
     if not filename:
-        return
+        filename, _ = QFileDialog.getSaveFileName(
+            window,
+            "Save Session",
+            os.path.join(session_dir(window), "flow_session.json"),
+            "JSON files (*.json)",
+        )
+        if not filename:
+            return
     try:
         payload = window._session_payload()
         with open(filename, "w") as fh:
             json.dump(payload, fh, indent=2)
         with open(last_session_path(window), "w") as fh:
             json.dump(payload, fh, indent=2)
+        window.current_session_path = os.path.abspath(filename)
         remember_recent_session(window, filename)
         window.status_label.setText(f"Saved session to {filename}")
     except Exception as exc:
@@ -155,6 +158,7 @@ def load_session(window):
         apply_session_payload(window, payload)
         with open(last_session_path(window), "w") as fh:
             json.dump(payload, fh, indent=2)
+        window.current_session_path = os.path.abspath(filename)
         remember_recent_session(window, filename)
         window.status_label.setText(f"Loaded session from {filename}")
     except Exception as exc:
@@ -176,6 +180,7 @@ def load_recent_session(window):
         apply_session_payload(window, payload)
         with open(last_session_path(window), "w") as fh:
             json.dump(payload, fh, indent=2)
+        window.current_session_path = os.path.abspath(filename)
         remember_recent_session(window, filename)
         window.status_label.setText(f"Loaded recent session from {filename}")
     except Exception as exc:
@@ -189,6 +194,7 @@ def autoload_last_session_or_folder(window, base_dir):
             with open(last_session) as fh:
                 payload = json.load(fh)
             apply_session_payload(window, payload)
+            window.current_session_path = None
             window.status_label.setText(f"Loaded last session from {last_session}")
             return
         except Exception as exc:
@@ -210,21 +216,24 @@ def close_event(window, event):
         event.ignore()
         return
     if choice == QMessageBox.Yes:
-        filename, _ = QFileDialog.getSaveFileName(
-            window,
-            "Save Session",
-            os.path.join(session_dir(window), "flow_session.json"),
-            "JSON files (*.json)",
-        )
+        filename = window.current_session_path
         if not filename:
-            event.ignore()
-            return
+            filename, _ = QFileDialog.getSaveFileName(
+                window,
+                "Save Session",
+                os.path.join(session_dir(window), "flow_session.json"),
+                "JSON files (*.json)",
+            )
+            if not filename:
+                event.ignore()
+                return
         try:
             payload = window._session_payload()
             with open(filename, "w") as fh:
                 json.dump(payload, fh, indent=2)
             with open(last_session_path(window), "w") as fh:
                 json.dump(payload, fh, indent=2)
+            window.current_session_path = os.path.abspath(filename)
             remember_recent_session(window, filename)
         except Exception as exc:
             window.status_label.setText(f"Failed to save session: {type(exc).__name__}: {exc}")
