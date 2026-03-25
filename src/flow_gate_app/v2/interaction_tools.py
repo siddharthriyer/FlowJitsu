@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 from matplotlib.path import Path
 from PySide6.QtWidgets import QApplication
 
@@ -25,6 +26,11 @@ def _interactive_active(window):
         or window.quad_preview_point is not None
         or window.polygon_cursor_point is not None
     )
+
+
+def _gate_linestyle(index):
+    styles = ["-", "--", ":", "-.", (0, (5, 1)), (0, (3, 1, 1, 1))]
+    return styles[index % len(styles)]
 
 
 def _interactive_downsample(window, transformed, limit=4000):
@@ -206,6 +212,7 @@ def redraw(window):
     y_channel = window.y_combo.currentText()
     histogram_mode = window.plot_mode_combo.currentText() == "count histogram" or _is_count_axis(y_channel)
     hist_limits = None
+    data_legend = None
     if histogram_mode:
         hist_limits = window._effective_histogram_axis_limits(plotted)
         hist_range = None if hist_limits is None else (hist_limits[0], hist_limits[1])
@@ -229,7 +236,7 @@ def redraw(window):
                     label=well,
                 )
             if len(labels) <= 12 and not interactive:
-                window.ax.legend(fontsize=8)
+                data_legend = window.ax.legend(fontsize=8, loc="upper left")
         window.ax.set_ylabel("Count")
     else:
         if len(labels) <= 1:
@@ -238,12 +245,37 @@ def redraw(window):
             for _, (well, group) in enumerate(plotted.groupby("__well__", sort=False)):
                 window.ax.scatter(group[x_channel], group[y_channel], s=3, alpha=0.25, label=well, rasterized=True)
             if len(labels) <= 12 and not interactive:
-                window.ax.legend(markerscale=3, fontsize=8)
+                data_legend = window.ax.legend(markerscale=3, fontsize=8, loc="upper left")
         window.ax.set_ylabel(f"{y_channel} ({window._plot_y_transform()})")
 
-    for gate in window.gates:
-        if window._visible_gate(gate):
-            _render_gate(window.ax, gate, selected=(gate["name"] == window.selected_gate_name))
+    visible_gates = [gate for gate in window.gates if window._visible_gate(gate)]
+    gate_handles = []
+    gate_labels = []
+    for idx, gate in enumerate(visible_gates):
+        artists = _render_gate(
+            window.ax,
+            gate,
+            selected=(gate["name"] == window.selected_gate_name),
+            linestyle=_gate_linestyle(idx),
+            label=gate["name"],
+        )
+        if artists:
+            gate_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=gate.get("color", "crimson"),
+                    linewidth=2.5 if gate["name"] == window.selected_gate_name else 1.8,
+                    linestyle=_gate_linestyle(idx),
+                )
+            )
+            gate_labels.append(gate["name"])
+
+    if len(gate_handles) > 1 and not interactive:
+        gate_legend = window.ax.legend(gate_handles, gate_labels, title="Gates", fontsize=8, title_fontsize=8, loc="upper right")
+        if data_legend is not None:
+            window.ax.add_artist(data_legend)
+            window.ax.add_artist(gate_legend)
 
     if window.pending_gate is not None:
         spec = window._pending_to_gate_spec(preview=True)
@@ -261,9 +293,14 @@ def redraw(window):
                         zorder=7,
                     )
                     if len(vertices) >= 2:
+                        xs = [point[0] for point in vertices]
+                        ys = [point[1] for point in vertices]
+                        if len(vertices) >= 3:
+                            xs.append(vertices[0][0])
+                            ys.append(vertices[0][1])
                         window.ax.plot(
-                            [point[0] for point in vertices],
-                            [point[1] for point in vertices],
+                            xs,
+                            ys,
                             linestyle="-",
                             linewidth=1.2,
                             color="#2f8c74",
@@ -496,6 +533,8 @@ def refresh_saved_gates(window, selected_name=None):
 
 
 def gate_label(window, gate):
+    lineage_names = [item["name"] for item in window._population_lineage(gate["name"])]
+    lineage_label = "All Events > " + " > ".join(lineage_names)
     if gate["gate_type"] == "vertical":
         axes_label = f"vertical @ {gate['x_channel']}"
     elif gate["gate_type"] == "horizontal":
@@ -503,7 +542,7 @@ def gate_label(window, gate):
     else:
         y_channel = gate["y_channel"] if gate.get("y_channel") else gate["x_channel"]
         axes_label = f"{gate['x_channel']} vs {y_channel}"
-    return f"{gate['name']} | {axes_label}"
+    return f"{lineage_label} | {axes_label}"
 
 
 def on_saved_gate_selected(window):

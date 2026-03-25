@@ -522,8 +522,10 @@ def refresh_population_combo(window, selected_name=None):
     window.population_labels = {"All Events": "__all__"}
     population_values = ["All Events"]
     for gate in window.gates:
-        window.population_labels[gate["name"]] = gate["name"]
-        population_values.append(gate["name"])
+        lineage_names = [item["name"] for item in window._population_lineage(gate["name"])]
+        display_label = "All Events > " + " > ".join(lineage_names)
+        window.population_labels[display_label] = gate["name"]
+        population_values.append(display_label)
     current_text = window.population_combo.currentText()
     window.population_combo.blockSignals(True)
     window.population_combo.clear()
@@ -532,7 +534,8 @@ def refresh_population_combo(window, selected_name=None):
     if target in population_values:
         window.population_combo.setCurrentText(target)
     else:
-        window.population_combo.setCurrentText("All Events")
+        target_label = next((label for label, name in window.population_labels.items() if name == target), "All Events")
+        window.population_combo.setCurrentText(target_label)
     window.population_combo.blockSignals(False)
 
 

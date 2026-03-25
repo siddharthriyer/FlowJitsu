@@ -198,23 +198,22 @@ def gate_mask(transformed_df, gate_spec):
     raise ValueError(f"Unsupported gate type: {gate_type}")
 
 
-def render_gate(ax, gate_spec, selected=False):
+def render_gate(ax, gate_spec, selected=False, linestyle="-", label=None):
     color = gate_spec.get("color", "crimson")
     linewidth = 2.5 if selected else 1.8
     if gate_spec["gate_type"] in {"polygon", "rectangle"}:
         vertices = np.asarray(gate_spec["vertices"])
         closed = np.vstack([vertices, vertices[0]])
-        ax.plot(closed[:, 0], closed[:, 1], color=color, linewidth=linewidth)
-        return
+        return ax.plot(closed[:, 0], closed[:, 1], color=color, linewidth=linewidth, linestyle=linestyle, label=label)
     if gate_spec["gate_type"] == "quad":
-        ax.axvline(gate_spec["x_threshold"], color=color, linewidth=linewidth)
-        ax.axhline(gate_spec["y_threshold"], color=color, linewidth=linewidth)
-        return
+        vline = ax.axvline(gate_spec["x_threshold"], color=color, linewidth=linewidth, linestyle=linestyle, label=label)
+        hline = ax.axhline(gate_spec["y_threshold"], color=color, linewidth=linewidth, linestyle=linestyle)
+        return [vline, hline]
     if gate_spec["gate_type"] == "vertical":
-        ax.axvline(gate_spec["x_threshold"], color=color, linewidth=linewidth)
-        return
+        return [ax.axvline(gate_spec["x_threshold"], color=color, linewidth=linewidth, linestyle=linestyle, label=label)]
     if gate_spec["gate_type"] == "horizontal":
-        ax.axhline(gate_spec["y_threshold"], color=color, linewidth=linewidth)
+        return [ax.axhline(gate_spec["y_threshold"], color=color, linewidth=linewidth, linestyle=linestyle, label=label)]
+    return []
 
 
 def build_flow_gate(gate_spec):

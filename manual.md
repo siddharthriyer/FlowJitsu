@@ -189,14 +189,22 @@ Gate behavior:
 - gate statistics update from the selected gate
 - drawing and dragging only begin after real pointer movement, which improves reliability on older trackpads
 - polygon drawing shows large vertex markers and can be closed by clicking near the first vertex, double-clicking, or right-clicking
+- completed polygon previews are rendered as visibly closed shapes before saving
 
 Gate organization:
 
 - gates are shown in the saved-gate list
+- saved-gate list entries now show full hierarchy paths from `All Events`
 - saved-gate list entries emphasize lineage and channels rather than recomputing percentages for every refresh
 - hierarchical population labels are displayed as lineage paths
+- the population selector also shows full hierarchy paths
 - threshold gate pairs are grouped together
 - boolean populations are generated for compatible sibling fluorescence gates
+
+Visible gate overlays:
+
+- when multiple visible gates are shown on one plot, they use different line styles
+- plots show a separate `Gates` legend when more than one gate overlay is visible
 
 Gate template features:
 
