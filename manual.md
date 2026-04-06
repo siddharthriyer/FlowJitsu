@@ -99,6 +99,7 @@ The `Plot` panel supports:
 - choosing X and Y channels
 - switching plot mode:
   - `scatter`
+  - `hex density`
   - `count histogram`
 - choosing auto-replot behavior:
   - `Auto`
@@ -111,10 +112,12 @@ The `Plot` panel supports:
 - opening graph controls with `Graph Options`
 - drawing a `Zoom Box`
 - resetting plot limits with `Reset Zoom`
+- using tooltips on the main plotting and gating controls for quick reminders
 - viewing a mixed-channel warning banner when selected wells do not all share the same channels
 - seeing the selected well name in the plot title
 - seeing the assigned sample name in the plot title when one selected well has metadata
 - keeping the interactive plot square
+- scaling the initial plot and heatmap panel sizes to the user screen so they are less likely to open clipped
 
 Supported transforms:
 
@@ -129,6 +132,7 @@ Scatter axis limit behavior:
 - shared limits use median per-file bounds
 - manual overrides can be applied with both text entry and sliders
 - manual overrides can be reset back to automatic limits
+- `Zoom Box` applies padded limits rather than hugging the selected rectangle exactly
 
 Histogram axis limit behavior:
 
@@ -147,6 +151,11 @@ Mixed-channel plotting behavior:
 - wells missing the current plot channels are skipped only where necessary
 - gates that depend on unavailable channels are skipped for wells that do not contain those channels
 - mixed-channel experiments can still be plotted and analyzed without forcing all files to share the same channel intersection
+
+Hex density behavior:
+
+- `hex density` is available as a third plot mode for dense scatter views
+- `Hex Size` controls the hexbin grid size directly
 
 ## Gating
 
@@ -167,7 +176,8 @@ Gating features:
 - recolor gates
 - delete gates
 - drag saved gates directly on the plot
-- move the selected polygon or rectangle gate with `Move Selected Gate`
+- move the selected polygon or rectangle gate with direct dragging
+- `Move Selected Gate` remains available as an explicit move action
 - move polygon vertices
 - translate full polygons
 - translate full rectangle gates
@@ -238,6 +248,7 @@ Plate features:
 
 - assign sample metadata to selected wells
 - assign dose curves
+- assign manual per-well dose lists instead of only geometric dilution series
 - mark wells excluded from downstream analysis
 - inspect well metadata in the editor
 - preview the plate layout in the main window
@@ -251,6 +262,11 @@ Dose curve defaults:
 - top dose: `50`
 - dilution ratio: `2`
 - points: `4`
+
+Dose entry modes:
+
+- `dilution_series` uses top dose, dilution ratio, and point count
+- `manual_list` accepts an explicit comma-separated dose list such as `50, 10, 2, 0.4`
 
 Control assignment:
 

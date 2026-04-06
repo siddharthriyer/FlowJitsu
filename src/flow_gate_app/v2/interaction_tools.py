@@ -210,7 +210,9 @@ def redraw(window):
     labels = window._selected_labels()
     x_channel = window.x_combo.currentText()
     y_channel = window.y_combo.currentText()
-    histogram_mode = window.plot_mode_combo.currentText() == "count histogram" or _is_count_axis(y_channel)
+    plot_mode = window.plot_mode_combo.currentText()
+    histogram_mode = plot_mode == "count histogram" or _is_count_axis(y_channel)
+    hex_mode = plot_mode == "hex density" and not histogram_mode
     hist_limits = None
     data_legend = None
     if histogram_mode:
@@ -240,12 +242,34 @@ def redraw(window):
         window.ax.set_ylabel("Count")
     else:
         if len(labels) <= 1:
-            window.ax.scatter(plotted[x_channel], plotted[y_channel], s=3, alpha=0.25, color="#1f77b4", rasterized=True)
+            if hex_mode:
+                window.ax.hexbin(
+                    plotted[x_channel],
+                    plotted[y_channel],
+                    gridsize=window.hex_size_spin.value(),
+                    bins="log",
+                    mincnt=1,
+                    cmap="viridis",
+                    linewidths=0.0,
+                )
+            else:
+                window.ax.scatter(plotted[x_channel], plotted[y_channel], s=3, alpha=0.25, color="#1f77b4", rasterized=True)
         else:
-            for _, (well, group) in enumerate(plotted.groupby("__well__", sort=False)):
-                window.ax.scatter(group[x_channel], group[y_channel], s=3, alpha=0.25, label=well, rasterized=True)
-            if len(labels) <= 12 and not interactive:
-                data_legend = window.ax.legend(markerscale=3, fontsize=8, loc="upper left")
+            if hex_mode:
+                window.ax.hexbin(
+                    plotted[x_channel],
+                    plotted[y_channel],
+                    gridsize=window.hex_size_spin.value(),
+                    bins="log",
+                    mincnt=1,
+                    cmap="viridis",
+                    linewidths=0.0,
+                )
+            else:
+                for _, (well, group) in enumerate(plotted.groupby("__well__", sort=False)):
+                    window.ax.scatter(group[x_channel], group[y_channel], s=3, alpha=0.25, label=well, rasterized=True)
+                if len(labels) <= 12 and not interactive:
+                    data_legend = window.ax.legend(markerscale=3, fontsize=8, loc="upper left")
         window.ax.set_ylabel(f"{y_channel} ({window._plot_y_transform()})")
 
     visible_gates = [gate for gate in window.gates if window._visible_gate(gate)]
@@ -398,6 +422,8 @@ def plot_population(window):
         window.current_data = raw_df
         window.current_transformed = transformed
         window.redraw()
+        if window.selected_gate_name and window._selected_gate() is not None:
+            window._enable_saved_gate_interaction()
         window._update_gate_summary()
         window._schedule_heatmap_update()
         window.status_label.setText("Population plotted in Qt mode.")
@@ -818,6 +844,12 @@ def on_zoom_box_click(window, event):
         window.zoom_current_point = point
         window.redraw()
         return
+    x_pad = max((x1 - x0) * 0.08, 1e-9)
+    y_pad = max((y1 - y0) * 0.08, 1e-9)
+    x0 -= x_pad
+    x1 += x_pad
+    y0 -= y_pad
+    y1 += y_pad
     if window.plot_mode_combo.currentText() == "count histogram" or _is_count_axis(window.y_combo.currentText()):
         key = window._hist_axis_override_key()
         if key is not None:
@@ -885,11 +917,12 @@ def enable_saved_gate_interaction(window):
     if gate is None or not window._visible_gate(gate):
         return
     window._disconnect_drawing()
+    window.translate_gate_mode = False
     window.edit_gate_mode = True
     window.canvas_press_drag_cid = window.canvas.mpl_connect("button_press_event", window._on_drag_press)
     window.canvas_motion_cid = window.canvas.mpl_connect("motion_notify_event", window._on_drag_motion)
     window.canvas_release_cid = window.canvas.mpl_connect("button_release_event", window._on_drag_release)
-    window.mode_label.setText(f"Mode: gate selected {gate['name']}")
+    window.mode_label.setText(f"Mode: gate selected {gate['name']} (drag to move or edit)")
 
 
 def start_edit_selected_gate(window):

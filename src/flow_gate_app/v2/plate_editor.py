@@ -109,6 +109,8 @@ def open_plate_map_editor(window):
     editor_box.layout().addWidget(dose_box)
     direction_combo = QComboBox()
     direction_combo.addItems(["horizontal", "vertical"])
+    dose_mode_combo = QComboBox()
+    dose_mode_combo.addItems(["dilution_series", "manual_list"])
     points_spin = QSpinBox()
     points_spin.setRange(1, 24)
     points_spin.setValue(4)
@@ -120,17 +122,26 @@ def open_plate_map_editor(window):
     dilution_spin.setRange(0.0001, 1_000_000.0)
     dilution_spin.setDecimals(4)
     dilution_spin.setValue(2.0)
+    manual_dose_edit = QLineEdit("")
+    manual_dose_edit.setPlaceholderText("e.g. 50, 10, 2, 0.4")
     dose_box.layout().addWidget(QLabel("Direction"), 0, 0)
     dose_box.layout().addWidget(direction_combo, 0, 1)
-    dose_box.layout().addWidget(QLabel("Points"), 1, 0)
-    dose_box.layout().addWidget(points_spin, 1, 1)
-    dose_box.layout().addWidget(QLabel("Top Dose"), 2, 0)
-    dose_box.layout().addWidget(top_dose_spin, 2, 1)
-    dose_box.layout().addWidget(QLabel("Dilution"), 3, 0)
-    dose_box.layout().addWidget(dilution_spin, 3, 1)
+    dose_box.layout().addWidget(QLabel("Dose Entry"), 1, 0)
+    dose_box.layout().addWidget(dose_mode_combo, 1, 1)
+    dose_box.layout().addWidget(QLabel("Points"), 2, 0)
+    dose_box.layout().addWidget(points_spin, 2, 1)
+    top_dose_label = QLabel("Top Dose")
+    dose_box.layout().addWidget(top_dose_label, 3, 0)
+    dose_box.layout().addWidget(top_dose_spin, 3, 1)
+    dilution_label = QLabel("Dilution")
+    dose_box.layout().addWidget(dilution_label, 4, 0)
+    dose_box.layout().addWidget(dilution_spin, 4, 1)
+    manual_dose_label = QLabel("Manual Doses")
+    dose_box.layout().addWidget(manual_dose_label, 5, 0)
+    dose_box.layout().addWidget(manual_dose_edit, 5, 1)
     export_button = QPushButton("Export Plate CSV")
     export_button.clicked.connect(window.export_plate_metadata_csv)
-    dose_box.layout().addWidget(export_button, 4, 0, 1, 2)
+    dose_box.layout().addWidget(export_button, 6, 0, 1, 2)
 
     curve_box = QGroupBox("Current Dose Curves")
     curve_box.setLayout(QVBoxLayout())
@@ -329,9 +340,32 @@ def open_plate_map_editor(window):
             info_label.setText("Enter a sample name first.")
             return
         direction = direction_combo.currentText().strip().lower()
-        n_points = max(int(points_spin.value()), 1)
-        top_dose = float(top_dose_spin.value())
-        dilution = float(dilution_spin.value())
+        dose_mode = dose_mode_combo.currentText().strip()
+        manual_doses = []
+        if dose_mode == "manual_list":
+            raw = manual_dose_edit.text().strip()
+            if not raw:
+                info_label.setText("Enter one or more manual doses first.")
+                return
+            try:
+                manual_doses = [
+                    float(token)
+                    for token in raw.replace("\n", ",").replace(";", ",").split(",")
+                    if token.strip()
+                ]
+            except Exception:
+                info_label.setText("Manual doses must be numeric values separated by commas.")
+                return
+            if not manual_doses:
+                info_label.setText("Enter one or more manual doses first.")
+                return
+            n_points = len(manual_doses)
+            top_dose = max(manual_doses)
+            dilution = ""
+        else:
+            n_points = max(int(points_spin.value()), 1)
+            top_dose = float(top_dose_spin.value())
+            dilution = float(dilution_spin.value())
         grouped = {}
         for well in wells:
             row = well[0]
@@ -348,7 +382,7 @@ def open_plate_map_editor(window):
         sorted_groups.sort(key=lambda item: item[0])
         for replicate_idx, (_key, group_wells) in enumerate(sorted_groups, start=1):
             for point_idx, well in enumerate(group_wells[:n_points]):
-                dose_value = top_dose / (dilution ** point_idx)
+                dose_value = manual_doses[point_idx] if dose_mode == "manual_list" else top_dose / (dilution ** point_idx)
                 meta = dict(window._metadata_for_well(well))
                 meta["sample_name"] = sample_name
                 meta["sample_type"] = sample_type
@@ -361,7 +395,10 @@ def open_plate_map_editor(window):
         window.sample_name_edit.setText(sample_name)
         window._invalidate_cached_outputs()
         window._schedule_heatmap_update()
-        info_label.setText(f"Assigned dose curve '{sample_name}' across {len(wells)} wells.")
+        info_label.setText(
+            f"Assigned dose curve '{sample_name}' across {len(wells)} wells using "
+            f"{'manual doses' if dose_mode == 'manual_list' else 'a dilution series'}."
+        )
         _refresh_dialog()
 
     def _apply_assignment():
@@ -473,6 +510,16 @@ def open_plate_map_editor(window):
         dose_box.setVisible(is_dose_curve)
         apply_button.setText("Apply Sample And Dose Curve" if is_dose_curve else "Apply Sample")
 
+    def _update_dose_mode():
+        is_manual = dose_mode_combo.currentText() == "manual_list"
+        top_dose_label.setVisible(not is_manual)
+        top_dose_spin.setVisible(not is_manual)
+        dilution_label.setVisible(not is_manual)
+        dilution_spin.setVisible(not is_manual)
+        manual_dose_label.setVisible(is_manual)
+        manual_dose_edit.setVisible(is_manual)
+        points_spin.setEnabled(not is_manual)
+
     table.itemSelectionChanged.connect(lambda: (_set_main_well_selection(_selected_wells_from_table()), _refresh_dialog()))
     apply_button.clicked.connect(_apply_assignment)
     toggle_button.clicked.connect(_toggle_exclude)
@@ -481,7 +528,9 @@ def open_plate_map_editor(window):
     extend_button.clicked.connect(_extend_selected_sample)
     delete_sample_button.clicked.connect(_delete_selected_sample)
     assignment_mode_combo.currentIndexChanged.connect(_update_assignment_mode)
+    dose_mode_combo.currentIndexChanged.connect(_update_dose_mode)
     dialog.finished.connect(lambda _result: (window._refresh_plate_panel(), window._refresh_well_list(selected_labels=window._selected_labels())))
     _update_assignment_mode()
+    _update_dose_mode()
     _refresh_dialog()
     dialog.exec()
