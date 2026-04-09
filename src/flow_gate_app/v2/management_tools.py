@@ -96,6 +96,11 @@ def refresh_plate_panel(window):
         tooltip = [well]
         if sample_name:
             tooltip.append(f"Sample: {sample_name}")
+        tooltip.append(f"Sample type: {meta.get('sample_type', '')}")
+        tooltip.append(f"Dose curve: {meta.get('dose_curve', '')}")
+        tooltip.append(f"Dose: {meta.get('dose', '')}")
+        tooltip.append(f"Replicate: {meta.get('replicate', '')}")
+        tooltip.append(f"Direction: {meta.get('dose_direction', '')}")
         tooltip.append(f"FCS file: {'yes' if has_fcs else 'no'}")
         if excluded:
             tooltip.append("Excluded from downstream analysis")

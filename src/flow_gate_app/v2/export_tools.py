@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 
 import pandas as pd
 from PySide6.QtWidgets import QFileDialog
@@ -161,8 +162,8 @@ def export_plate_metadata_csv(window):
         window.status_label.setText(f"Failed to save plate metadata: {type(exc).__name__}: {exc}")
 
 
-def analysis_bundle_paths(window):
-    return _analysis_bundle_paths_impl(window)
+def analysis_bundle_paths(window, notebook_path=None):
+    return _analysis_bundle_paths_impl(window, notebook_path=notebook_path)
 
 
 def write_analysis_bundle_csvs(window, bundle_paths):
@@ -184,7 +185,19 @@ def open_analysis_preview(window):
 
 def create_analysis_notebook(window):
     try:
-        bundle_paths = window._analysis_bundle_paths()
+        default_name = f"{datetime.now().strftime('%Y-%m-%d')}_flow_desktop_analysis.ipynb"
+        default_path = os.path.join(window._default_export_dir(), default_name)
+        notebook_path, _ = QFileDialog.getSaveFileName(
+            window,
+            "Save Analysis Notebook",
+            default_path,
+            "Jupyter notebooks (*.ipynb)",
+        )
+        if not notebook_path:
+            return
+        if not notebook_path.lower().endswith(".ipynb"):
+            notebook_path = f"{notebook_path}.ipynb"
+        bundle_paths = window._analysis_bundle_paths(notebook_path=notebook_path)
         window._write_analysis_bundle_csvs(bundle_paths)
         nb = _analysis_notebook_dict_impl(
             summary_relpath=os.path.relpath(bundle_paths["summary_path"], os.path.dirname(bundle_paths["notebook_path"])),

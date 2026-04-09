@@ -319,7 +319,7 @@ def redraw(window):
                     if len(vertices) >= 2:
                         xs = [point[0] for point in vertices]
                         ys = [point[1] for point in vertices]
-                        if len(vertices) >= 3:
+                        if len(vertices) >= 3 and not window.polygon_vertices:
                             xs.append(vertices[0][0])
                             ys.append(vertices[0][1])
                         window.ax.plot(

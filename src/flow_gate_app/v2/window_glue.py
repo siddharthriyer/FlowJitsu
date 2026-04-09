@@ -26,6 +26,7 @@ def on_channel_changed(window):
         window.y_combo.blockSignals(True)
         window.y_combo.setCurrentText("Count")
         window.y_combo.blockSignals(False)
+    _update_plot_mode_controls(window)
     window._refresh_heatmap_controls()
     window._schedule_plot_update()
 
@@ -53,6 +54,12 @@ def trigger_auto_plot(window, *_args):
 
 def on_auto_plot_mode_changed(window):
     window.auto_plot_enabled = window.auto_plot_auto_radio.isChecked()
+
+
+def _update_plot_mode_controls(window):
+    show_hex_size = window.plot_mode_combo.currentText() == "hex density"
+    window.hex_size_label.setVisible(show_hex_size)
+    window.hex_size_spin.setVisible(show_hex_size)
 
 
 def refresh_heatmap_controls(window):
@@ -96,6 +103,7 @@ def session_payload(window):
             "x_channel": window.x_combo.currentText(),
             "y_channel": window.y_combo.currentText(),
             "plot_mode": window.plot_mode_combo.currentText(),
+            "hex_size": int(window.hex_size_spin.value()),
             "x_transform": window.x_transform_combo.currentText(),
             "x_cofactor": int(window.x_cofactor_spin.value()),
             "y_transform": window.y_transform_combo.currentText(),

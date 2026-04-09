@@ -166,14 +166,21 @@ def open_plate_map_editor(window):
         wells = {item.data(Qt.UserRole) for item in table.selectedItems() if item is not None}
         return sorted(wells, key=lambda well: (well[0], int(well[1:])))
 
-    def _set_main_well_selection(wells):
+    def _set_main_well_selection(wells, schedule_plot=True):
         target_labels = {label for label in window.file_map if label.split(" | ")[0] in set(wells)}
         window.well_list.blockSignals(True)
         for idx in range(window.well_list.count()):
             item = window.well_list.item(idx)
             item.setSelected(item.data(Qt.UserRole) in target_labels)
         window.well_list.blockSignals(False)
-        window._on_well_selection_changed()
+        window._refresh_channel_controls()
+        window._refresh_plate_panel()
+        if len(wells) == 1:
+            window.sample_name_edit.setText(str(window._metadata_for_well(wells[0]).get("sample_name", "")))
+        elif not wells:
+            window.sample_name_edit.setText("")
+        if schedule_plot:
+            window._schedule_plot_update()
 
     def _sample_names_in_use():
         return sorted({
@@ -301,8 +308,6 @@ def open_plate_map_editor(window):
             "Click or drag across wells to select them. "
             "Use Sample Manager to highlight an assigned sample across the plate."
         )
-        window._refresh_well_list(selected_labels=window._selected_labels())
-        window._refresh_plate_panel()
         _refresh_sample_panel()
         _refresh_curve_panel()
 
@@ -418,10 +423,11 @@ def open_plate_map_editor(window):
             meta = dict(window._metadata_for_well(well))
             meta["excluded"] = new_value
             window.plate_metadata[well] = meta
-        _set_main_well_selection(wells)
+        _set_main_well_selection(wells, schedule_plot=False)
         window._invalidate_cached_outputs()
         window._schedule_heatmap_update()
         info_label.setText(f"{'Excluded' if new_value else 'Included'} {len(wells)} wells.")
+        window._schedule_plot_update()
         _refresh_dialog()
 
     def _clear_selected():
@@ -477,10 +483,11 @@ def open_plate_map_editor(window):
             meta["sample_name"] = sample_name
             meta["sample_type"] = str(source_meta.get("sample_type", sample_type_combo.currentText().strip() or "sample")).strip()
             window.plate_metadata[well] = meta
-        _set_main_well_selection(wells)
+        _set_main_well_selection(wells, schedule_plot=False)
         window._invalidate_cached_outputs()
         window._schedule_heatmap_update()
         info_label.setText(f"Extended sample '{sample_name}' into {len(wells)} wells.")
+        window._schedule_plot_update()
         _refresh_dialog()
 
     def _delete_selected_sample():
@@ -500,9 +507,11 @@ def open_plate_map_editor(window):
             for field in ("sample_name", "sample_type", "dose_curve", "dose", "replicate", "dose_direction"):
                 meta.pop(field, None)
             window.plate_metadata[well] = meta
+        _set_main_well_selection(wells, schedule_plot=False)
         window._invalidate_cached_outputs()
         window._schedule_heatmap_update()
         info_label.setText(f"Deleted sample '{sample_name}' from {len(wells)} wells.")
+        window._schedule_plot_update()
         _refresh_dialog()
 
     def _update_assignment_mode():
@@ -520,7 +529,7 @@ def open_plate_map_editor(window):
         manual_dose_edit.setVisible(is_manual)
         points_spin.setEnabled(not is_manual)
 
-    table.itemSelectionChanged.connect(lambda: (_set_main_well_selection(_selected_wells_from_table()), _refresh_dialog()))
+    table.itemSelectionChanged.connect(_refresh_dialog)
     apply_button.clicked.connect(_apply_assignment)
     toggle_button.clicked.connect(_toggle_exclude)
     clear_button.clicked.connect(_clear_selected)

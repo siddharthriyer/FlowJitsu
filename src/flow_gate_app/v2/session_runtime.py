@@ -98,8 +98,10 @@ def apply_session_payload(window, payload):
     window.x_cofactor_spin.setValue(int(plot.get("x_cofactor", window.x_cofactor_spin.value())))
     window.y_transform_combo.setCurrentText(plot.get("y_transform", window.y_transform_combo.currentText()))
     window.y_cofactor_spin.setValue(int(plot.get("y_cofactor", window.y_cofactor_spin.value())))
-    if plot.get("plot_mode") in {"scatter", "count histogram"}:
+    if plot.get("plot_mode") in {"scatter", "hex density", "count histogram"}:
         window.plot_mode_combo.setCurrentText(plot["plot_mode"])
+    if "hex_size" in plot:
+        window.hex_size_spin.setValue(int(plot["hex_size"]))
     if plot.get("x_channel") in window.channel_names:
         window.x_combo.setCurrentText(plot["x_channel"])
     y_values = [window.y_combo.itemText(i) for i in range(window.y_combo.count())]

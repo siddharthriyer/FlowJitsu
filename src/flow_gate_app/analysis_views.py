@@ -685,11 +685,17 @@ def open_analysis_preview(self):
     redraw_preview()
 
 
-def analysis_bundle_paths(self):
+def analysis_bundle_paths(self, notebook_path=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     date_label = datetime.now().strftime("%Y-%m-%d")
-    export_root = self._default_export_dir()
-    export_dir = os.path.join(export_root, timestamp)
+    if notebook_path:
+        notebook_path = os.path.abspath(notebook_path)
+        notebook_dir = os.path.dirname(notebook_path)
+        notebook_stem = os.path.splitext(os.path.basename(notebook_path))[0]
+        export_dir = os.path.join(notebook_dir, f"{notebook_stem}_files")
+    else:
+        export_root = self._default_export_dir()
+        export_dir = os.path.join(export_root, timestamp)
     os.makedirs(export_dir, exist_ok=True)
     return {
         "timestamp": timestamp,
@@ -699,7 +705,7 @@ def analysis_bundle_paths(self):
         "intensity_path": os.path.join(export_dir, "flow_intensity_distribution.csv"),
         "plate_path": os.path.join(export_dir, "plate_metadata.csv"),
         "html_path": os.path.join(export_dir, f"{date_label}_flow_desktop_report.html"),
-        "notebook_path": os.path.join(self._app_home(), f"{date_label}_flow_desktop_analysis.ipynb"),
+        "notebook_path": notebook_path or os.path.join(self._app_home(), f"{date_label}_flow_desktop_analysis.ipynb"),
     }
 
 

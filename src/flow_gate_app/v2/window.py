@@ -262,6 +262,8 @@ class FlowDesktopQtWindow(QMainWindow):
         self.setWindowTitle(f"{APP_BRAND} v{__version__} [Qt Preview]")
         self.resize(1640, 940)
         self._build_ui(instrument=instrument, max_points=max_points)
+        self.hex_size_label.setVisible(False)
+        self.hex_size_spin.setVisible(False)
         self._update_compensation_status()
         self._autoload_last_session_or_folder(base_dir)
 
@@ -711,8 +713,8 @@ class FlowDesktopQtWindow(QMainWindow):
     def export_plate_metadata_csv(self):
         return _export_plate_metadata_csv_impl(self)
 
-    def _analysis_bundle_paths(self):
-        return _analysis_bundle_paths_impl(self)
+    def _analysis_bundle_paths(self, notebook_path=None):
+        return _analysis_bundle_paths_impl(self, notebook_path=notebook_path)
 
     def _write_analysis_bundle_csvs(self, bundle_paths):
         return _write_analysis_bundle_csvs_impl(self, bundle_paths)
