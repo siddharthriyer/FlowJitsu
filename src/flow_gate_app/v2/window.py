@@ -241,6 +241,9 @@ class FlowDesktopQtWindow(QMainWindow):
         self.scatter_x_axis_overrides = {}
         self.scatter_y_axis_overrides = {}
         self.hist_axis_overrides = {}
+        # When set to (xmin, xmax, ymin, ymax), these limits are applied to every
+        # scatter plot regardless of channel pair (see Graph Options "apply to all").
+        self.global_scatter_axis_limits = None
         self.edit_gate_mode = False
         self.translate_gate_mode = False
         self.drag_state = None

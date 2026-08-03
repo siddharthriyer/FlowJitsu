@@ -4,6 +4,7 @@ import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QGridLayout,
     QHBoxLayout,
@@ -96,6 +97,12 @@ def open_graph_options_dialog(window):
     auto_label.setWordWrap(True)
     layout.addWidget(auto_label)
 
+    # Explicit option: apply the entered limits to every scatter plot (all channel pairs).
+    apply_all_checkbox = QCheckBox("Apply these limits to all scatter plots (global)")
+    apply_all_checkbox.setChecked(not histogram_mode and window.global_scatter_axis_limits is not None)
+    apply_all_checkbox.setVisible(not histogram_mode)
+    layout.addWidget(apply_all_checkbox)
+
     def _sync_edit_from_slider(edit, slider, low, high):
         edit.setText(_fmt(_from_slider(slider.value(), low, high)))
 
@@ -141,6 +148,8 @@ def open_graph_options_dialog(window):
             if hist_key is not None:
                 window.hist_axis_overrides.pop(hist_key, None)
         else:
+            window.global_scatter_axis_limits = None
+            apply_all_checkbox.setChecked(False)
             x_key = window._scatter_x_axis_override_key()
             y_key = window._scatter_y_axis_override_key()
             if x_key is not None:
@@ -177,7 +186,14 @@ def open_graph_options_dialog(window):
             hist_key = window._hist_axis_override_key()
             if hist_key is not None:
                 window.hist_axis_overrides[hist_key] = (xmin, xmax, ymin, ymax)
+        elif apply_all_checkbox.isChecked():
+            # Global: use these limits for every scatter plot, and clear any
+            # per-channel overrides so behavior is unambiguous.
+            window.global_scatter_axis_limits = (xmin, xmax, ymin, ymax)
+            window.scatter_x_axis_overrides.clear()
+            window.scatter_y_axis_overrides.clear()
         else:
+            window.global_scatter_axis_limits = None
             x_key = window._scatter_x_axis_override_key()
             y_key = window._scatter_y_axis_override_key()
             if x_key is not None:

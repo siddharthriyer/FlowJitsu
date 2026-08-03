@@ -729,6 +729,9 @@ def effective_scatter_axis_limits(window):
     base_limits = window._median_scatter_axis_limits()
     if base_limits is None:
         return None
+    global_limits = getattr(window, "global_scatter_axis_limits", None)
+    if global_limits is not None:
+        return (float(global_limits[0]), float(global_limits[1]), float(global_limits[2]), float(global_limits[3]))
     x_override = window.scatter_x_axis_overrides.get(window._scatter_x_axis_override_key())
     y_override = window.scatter_y_axis_overrides.get(window._scatter_y_axis_override_key())
     x_limits = x_override if x_override is not None else base_limits[:2]
