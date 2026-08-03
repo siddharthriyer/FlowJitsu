@@ -201,6 +201,9 @@ class AnalysisPreviewDialog(QDialog):
         controls.addWidget(dist_hue_label, 0, 6)
         self.hue_dist_combo = QComboBox()
         self.hue_dist_combo.addItems(dist_hue_values)
+        # Default to one violin per sample in distribution mode.
+        if "sample_name" in dist_hue_values:
+            self.hue_dist_combo.setCurrentText("sample_name")
         self.hue_dist_combo.currentIndexChanged.connect(self.redraw)
         controls.addWidget(self.hue_dist_combo, 1, 6)
         self._register_control("dist_hue", dist_hue_label, self.hue_dist_combo)
